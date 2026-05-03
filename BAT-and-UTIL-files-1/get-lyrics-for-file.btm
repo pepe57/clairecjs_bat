@@ -2947,10 +2947,10 @@ rem Download the lyrics using the currently-selected provider: BEGIN: ———�
 
                         rem Whether replacing or keeping, the next step is to move the downloaded file from the temp filename into the proper filename:
                                 if not defined VERB set VERB=Keeping
-                                if exist  "%LRC_SIDECAR_FILENAME_TEMP%" (echos %ANSI_COLOR_SUCCESS%  %CHECK% %VERB%: `` %+ *ren /Ns  "%LRC_SIDECAR_FILENAME_TEMP%"  "%LRC_SIDECAR_FILENAME%" %+ echos %ANSI_COLOR_NORMAL%)
+                                if exist  "%LRC_SIDECAR_FILENAME_TEMP%" (echos %ANSI_COLOR_SUCCESS%   %CHECK% %VERB%: `` %+ *ren /Ns  "%LRC_SIDECAR_FILENAME_TEMP%"  "%LRC_SIDECAR_FILENAME%" %+ echos %ANSI_COLOR_NORMAL%)
                                 if "1" == "%QUICK_LRC_MODE%" goto :skip_for_quick_lrc_mode_2499
-                                if exist "%ELRC_SIDECAR_FILENAME_TEMP%" (echos %ANSI_COLOR_SUCCESS%  %CHECK% %VERB%: `` %+ *ren /Ns "%ELRC_SIDECAR_FILENAME_TEMP%" "%ELRC_SIDECAR_FILENAME%" %+ echos %ANSI_COLOR_NORMAL%)                               
-                                if exist  "%TXT_SIDECAR_FILENAME_TEMP%" (echos %ANSI_COLOR_SUCCESS%  %CHECK% %VERB%: `` %+ *ren /Ns  "%TXT_SIDECAR_FILENAME_TEMP%"  "%TXT_SIDECAR_FILENAME%" %+ echos %ANSI_COLOR_NORMAL% %+ goto /i :if_we_just_answered_y_going_here_will_complete_the_lyric_process)
+                                if exist "%ELRC_SIDECAR_FILENAME_TEMP%" (echos %ANSI_COLOR_SUCCESS%   %CHECK% %VERB%: `` %+ *ren /Ns "%ELRC_SIDECAR_FILENAME_TEMP%" "%ELRC_SIDECAR_FILENAME%" %+ echos %ANSI_COLOR_NORMAL%)                               
+                                if exist  "%TXT_SIDECAR_FILENAME_TEMP%" (echos %ANSI_COLOR_SUCCESS%   %CHECK% %VERB%: `` %+ *ren /Ns  "%TXT_SIDECAR_FILENAME_TEMP%"  "%TXT_SIDECAR_FILENAME%" %+ echos %ANSI_COLOR_NORMAL% %+ goto /i :if_we_just_answered_y_going_here_will_complete_the_lyric_process)
                                 :skip_for_quick_lrc_mode_2499
 
                         rem If we successfully added an LRC when there is no SRT, we actually brought 1 more file into compliance, and our logfile should really account for that, and we are done...
