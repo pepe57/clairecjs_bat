@@ -28,7 +28,7 @@ rem ///// Branched to new version of this script with Windows 10, older OSes get
     REM DEBUG: echo [DEBUG] prompt-common: os is %OS
     if "%OS" == "95" .or. "%OS" == "98" .or. "%OS" == "ME" .or. "%OS" == "2K" .or. "%OS" == "7" (call prompt-common-pre-win10-fork.bat %* %+ goto :END)
 
-rem ///// ANSI CONSTANTS (probably malformed, but work, so I never fixed them):
+rem ///// ANSI CONSTANTS:
     :: QUICK-REF: 1=BOLD;30=Black,31=Red,32=Green,33=Yellow,34=Blue,35=Purp,36=Cyan,37=White
     set           RED=1;31;31  %+ rem is this right?
     set    BRIGHT_RED=1;32;31  %+ rem is this right?
@@ -47,12 +47,14 @@ rem ///// ANSI CONSTANTS (probably malformed, but work, so I never fixed them):
 
 rem ///// DEFAULT COLORS THAT CAN BE OVERRIDDEN:
     if not defined CPU_USAGE_PERCENTS  set  CPU_USAGE_PERCENTS=%YELLOW%
-    if not defined CPU_USAGE_BRACKETS  set  CPU_USAGE_BRACKETS=%GREEN% %+ rem %BRIGHT_YELLOW%
+    if not defined CPU_USAGE_BRACKETS  set  CPU_USAGE_BRACKETS=%GREEN% 
     if not defined PATH_COLOR_THE_PATH set PATH_COLOR_THE_PATH=%BRIGHT_GREEN%
     if not defined PATH_COLOR_BRACKETS set PATH_COLOR_BRACKETS=%GREEN%
     if not defined TIME_COLOR_THE_TIME set TIME_COLOR_THE_TIME=%RED%
     if not defined TIME_COLOR_BRACKETS set TIME_COLOR_BRACKETS=%BRIGHT_RED%
     if not defined USER__TYPING__COLOR set USER__TYPING__COLOR=%WHITE%
+    if not defined ESCAPE              set ESCAPE==%@CHAR[27]
+    if not defined BIG_OFF             set BIG_OFF=%ESCAPE%#5
 
 rem ///// DEFAULT BEHAVIOR THAT CAN BE OVERRIDDEN:
     if not defined ADD_THE_CPU_USAGE   set ADD_THE_CPU_USAGE=1
@@ -77,7 +79,7 @@ rem ///// BUILD THE PROMPT:
             iff "%TEXT_AT_START%" != "" .and. 1 eq 1 then
                 rem set TMPPROMPT=%TMPPROMPT%%TEXT_AT_START% ``
                 rem gotta overwrite gross ansi leftovers
-                set TMPPROMPT=%TMPPROMPT%%@ANSI_MOVE_TO_COL[1]%TEXT_AT_START% ``
+                set TMPPROMPT=%TMPPROMPT%%@ANSI_MOVE_TO_COL[1]%BIG_OFF%%TEXT_AT_START% ``
             endiff
     :Add_Time_Of_Day
         set TMPPROMPT=%TMPPROMPT%$e[%TIME_COLOR_BRACKETS%m$L
@@ -201,15 +203,5 @@ rem ///// FORMAT/SBUSTITUTE PLACEHOLDER/SET THE PROMPT:
 
 rem ///// CLEAN UP:
     echo %prompt%>c:\bat\prompt.cmd
-    unset /q CPU_USAGE_PERCENTS
-    unset /q CPU_USAGE_BRACKETS
-    unset /q PATH_BRACKET_BEFORE
-    unset /q PATH_COLOR_THE_PATH
-    unset /q PATH_COLOR_BRACKETS
-    unset /q TIME_COLOR_THE_TIME
-    unset /q TIME_COLOR_BRACKETS
-    unset /q USER__TYPING__COLOR
-    unset /q SUPPRESS_LESSTHAN_BEFORE_PATH
-    unset /q TEXT_BEFORE_PATH
-    unset /q TEXT_AT_START
+    unset /q CPU_USAGE_PERCENTS CPU_USAGE_BRACKETS PATH_BRACKET_BEFORE PATH_COLOR_THE_PATH PATH_COLOR_BRACKETS TIME_COLOR_THE_TIME TIME_COLOR_BRACKETS USER__TYPING__COLOR SUPPRESS_LESSTHAN_BEFORE_PATH TEXT_BEFORE_PATH TEXT_AT_START
 :END

@@ -1,4 +1,4 @@
-@rem ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ This is a speedup function to use a generated prompt rather than regenerating it.
+@loadbtm on
 @Echo OFF
 @on break cancel
 

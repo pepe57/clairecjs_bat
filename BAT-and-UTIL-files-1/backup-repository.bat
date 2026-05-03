@@ -1,6 +1,11 @@
 @loadbtm on
 @Echo OFF
- on break cancel
+
+
+rem Set Ctrl-Break policy:
+        rem @on break cancel ... What was the justification for having this on for years? backup-all-repositories is canceled if we do this
+        rem @on break exit /b instead?
+        @on break continue
 
 rem Capture and validate parameters:
         set SOURCE=%1

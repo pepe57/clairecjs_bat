@@ -1,9 +1,24 @@
-@echo Off
-@on break cancel
-pushd
+
+@loadbtm on
+@Echo Off
 
 
-::: INVOCATION PATTERN:
+rem set Ctrl-Break policy:
+        rem @on break cancel was set for years but if we break out of 1 backup in run-all-backups it kicks us to command line and we don’t like this
+        rem Changed to on break continue on 20260503:
+        on break continue
+
+
+
+
+rem Make sure we end up where we started by saving the current folder:
+        pushd
+
+
+
+
+
+rem INVOCATION PATTERN:
 	:@Echo OFF
 	:set   SYNCSOURCE=%UTIL%
 	:set   SYNCTARGET=%DROPBOX%\BACKUPS\UTIL
@@ -23,7 +38,7 @@ pushd
                 set SYNCTARGET=%2
                 if not isdir %SYNCTARGET% (mkdir /s %SYNCTARGET%)
         endiff
-        if "%SYNCTRIGER%" == "" (set SYNCTRIGER=%3)
+        if "%SYNCTRIGER%" == "" (set SYNCTRIGER=%3             )
         if "%SYNCTRIGER%" == "" (set SYNCTRIGER=__ sync info __)
 
     ::::: VALIDATE INVOCATION GIVEN:
@@ -34,16 +49,22 @@ pushd
         if not isdir  %SYNCSOURCE% (call FATAL_ERROR "SYNCTARGET of '%italics_on%%syncsource%%italics_off%' must exist!" %+ goto :END) 
         if not isdir  %SYNCTARGET% (call FATAL_ERROR "SYNCTARGET of '%italics_on%%synctarget%%italics_off%' must exist!" %+ goto :END) 
         if not defined SYNCTRIGER  (call FATAL_ERROR "SYNCTRIGER (yes spelled that way) must be defined!"                %+ goto :END) 
-        call validate-environment-variables SYNCSOURCE SYNCTARGET 
+        if not isdir %SYNCSOURCE% .or. not isdir %SYNCTARGET% call validate-environment-variables SYNCSOURCE SYNCTARGET  %+ rem This is redundant
+
+
+rem Validate environment (once):
+        iff "1" != "%validated_syncafoldersomewhere%" then
+                call validate-in-path               pause-for-x-seconds klaxon print-message warning display-free-space fatal_error beep validate-environment-variables validate-environment-variable %ZIPPER% zip echos footer title
+                call validate-environment-variables ansi_colors_have_been_set
+                set  validated_syncafoldersomewhere=1
+        endiff
+
+
 
 :CaptureParameters
     :ZippingOrNot
                                   set ZIP=0
         if "%@UPPER[%1]" eq "ZIP" set ZIP=1
-
-    :: SUPPRESS ZIP FUNCTIONALITY BECAUSE INFOZIP SUCKS!
-    :: WHAT DID I GET MYSELF INTO? IT DOESN'T WORK RIGHT!
-        :SET ZIP=0
 
     :AdjustForTesting
                                  set    TESTING=0
@@ -65,7 +86,7 @@ pushd
         set TARGETNAME=%@NAME[%SYNCTARGET%]
 
     ::::: DETERMINE COMMAND TO USE FOR COPY BACKUPS:
-        :adding /e is controversial - no error messages!
+        rem adding /e is controversial - no error messages!
         set REDOCOMMAND=*copy /e /w /u /s /r /a: /h /z /k /g /Nt %OPTIONS% %* "%@UNQUOTE[%SYNCSOURCE%]" "%@UNQUOTE[%SYNCTARGET%]"
 
     ::::: DETERMINE COMMAND TO USE FOR ZIP BACKUPS:
@@ -74,7 +95,6 @@ pushd
                                     set ZIPPER=call zip.bat
                 :f "%CYGWIN%" eq "" set ZIPPER=%UTIL%\infozip.exe
                 if "%CYGWIN%" eq "" set ZIPPER=%UTIL%\wzzip.exe
-
             :: determine target zip base name
                 set ZIPBASEDIR=%@UNQUOTE[%SYNCTARGET%]
                 set ZIPBASENAME=%@name[%syncsource%]
@@ -95,6 +115,9 @@ pushd
                 set REDOCOMMAND=%ZIPPER% %UPDATE% "%ZIPFULLNAME%" %RECURSE% "%@UNQUOTE[%SYNCSOURCE%]\" 
 
                 set LAST_REDOCOMMAND=%REDOCOMMAND%
+
+            :: 2026 addition:
+                if not exist "%ZIPPER%" call validate-environment-variable ZIPPER
 
             :: store it for diagnostic purposes
                 set ZIP_COMMAND_%ZIPBASENAME=%REDOCOMMAND%
@@ -120,8 +143,8 @@ pushd
     echo.
 
 :Re_Validate
-    call validate-environment-variables SYNCSOURCE SYNCTARGET 
-    if %REDO eq 1 (goto :Re_Validate)
+    if not isdir "%@UNQUOTE["%SYNCSOURCE%"]" .or. not isdir "%@UNQUOTE["%SYNCTARGET%"]"  call validate-environment-variables SYNCSOURCE SYNCTARGET 
+    if "1" == "%REDO%" (goto /i :Re_Validate)
 
 
 :Do_It
@@ -138,31 +161,31 @@ pushd
     %COLOR_SUCCESS%  
 
 :FlagLastSync
-    if "%@UPPER[%SYNCTRIGER%]" eq "NONE" goto :NoFlag
-        set TRIGGER="%@UNQUOTE[%SYNCSOURCE%\%SYNCTRIGER%]"
-        echo.                          >>:u8%TRIGGER%
-        echo.                          >>:u8%TRIGGER%
-        %COLOR_DEBUG% %+ echo	     ``>>:u8%TRIGGER%
-        %COLOR_NORMAL %+               >>:u8%TRIGGER%
-        echo SYNC_SOURCE=%SYNCSOURCE%  >>:u8%TRIGGER%
-        echo SYNC_TARGET=%SYNCTARGET%  >>:u8%TRIGGER%
-        echo        TIME=%_DATETIME    >>:u8%TRIGGER%
-        echo.                          >>:u8%TRIGGER%
-        echo.                          >>:u8%TRIGGER%
+        if "%@UPPER[%SYNCTRIGER%]" eq "NONE" goto :NoFlag
+                set TRIGGER="%@UNQUOTE[%SYNCSOURCE%\%SYNCTRIGER%]"
+                echo.                          >>:u8%TRIGGER%
+                echo.                          >>:u8%TRIGGER%
+                %COLOR_DEBUG% %+ echo	     ``>>:u8%TRIGGER%
+                %COLOR_NORMAL %+               >>:u8%TRIGGER%
+                echo SYNC_SOURCE=%SYNCSOURCE%  >>:u8%TRIGGER%
+                echo SYNC_TARGET=%SYNCTARGET%  >>:u8%TRIGGER%
+                echo        TIME=%_DATETIME    >>:u8%TRIGGER%
+                echo.                          >>:u8%TRIGGER%
+                echo.                          >>:u8%TRIGGER%
 
-        set TRIGGER="%@UNQUOTE[%SYNCTARGET%\%SYNCTRIGER%]"
-        echo.                          >>:u8%TRIGGER%
-        echo.                          >>:u8%TRIGGER%
-        %COLOR_DEBUG% %+ echo	     ``>>:u8%TRIGGER%
-        %COLOR_NORMAL %+               >>:u8%TRIGGER%
-        echo SYNC_SOURCE=%SYNCSOURCE%  >>:u8%TRIGGER%
-        echo SYNC_TARGET=%SYNCTARGET%  >>:u8%TRIGGER%
-        echo        TIME=%_DATETIME    >>:u8%TRIGGER%
-        echo.                          >>:u8%TRIGGER%
-        echo.                          >>:u8%TRIGGER%
-:NoFlag
+                set TRIGGER="%@UNQUOTE[%SYNCTARGET%\%SYNCTRIGER%]"
+                echo.                          >>:u8%TRIGGER%
+                echo.                          >>:u8%TRIGGER%
+                %COLOR_DEBUG% %+ echo	     ``>>:u8%TRIGGER%
+                %COLOR_NORMAL %+               >>:u8%TRIGGER%
+                echo SYNC_SOURCE=%SYNCSOURCE%  >>:u8%TRIGGER%
+                echo SYNC_TARGET=%SYNCTARGET%  >>:u8%TRIGGER%
+                echo        TIME=%_DATETIME    >>:u8%TRIGGER%
+                echo.                          >>:u8%TRIGGER%
+                echo.                          >>:u8%TRIGGER%
+        :NoFlag
 
-    goto :END
+goto :END
 
 
 ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
