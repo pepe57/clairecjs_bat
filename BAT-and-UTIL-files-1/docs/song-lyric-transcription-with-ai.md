@@ -116,6 +116,9 @@
       - Go into ```Appearance``` and change the font to *Cascadia Code*, which has the proper [ligature rendering](https://github.com/microsoft/cascadia-code#font-features) that I take advantage of cosmetically.
       
 
+6. 📺 VLCPlayer 📺
+    - Optional, but the default player defined for previewing our audio files
+
 &nbsp;    
 
 
@@ -185,6 +188,66 @@ The structure of the repository is assumed to be subfolders for the 1ˢᵗ lette
 
 </details>
 
+-----------------------------------------------------------------------------------------------------------------------------------------------
+
+# ⌨ Keystroke Guide ⌨
+
+The menus tell us this information, but here is a general guide of keystrokes used in the system.
+
+
+The obvious:
+
+| Key       | Meaning                                            | Action                                                                       |
+| --------- | ----------------------------                       | ---------------------------------------------------------------------------- |
+| - ```Y``` | Yes                                                | please do the thing                                                          |
+| - ```N``` | No                                                 | do NOT do the thing                                                          |
+
+Both subsystems:
+
+| Key       | Meaning                                            | Action                                                                                                        |
+| --------- | ----------------------------                       | ------------------------------------------------------------------------------------------------------------- |
+| - ```$``` | Retry lyrics                                       | start over by going back to the lyric-fetching system                                                         | 
+| - ```E``` | Edit                                               | opens lyrics and transcribed karaoke subtitles in your favorite text editor                                   | 
+| - ```I``` | Is Instrumental                                    | marks current file as ```[instrumental]``` to prevent transcription and ensure accurate file status reporting | 
+| - ```L``` | is Lyric*less*                                     | marks current file as lyric*less* which means lyrics are impossible to find, so stop trying                   | 
+| - ```M``` | renaMe                                             | rename the current file and corresponding sidecar files [can also achieve this with ```I``` and ```S```]      | 
+| - ```P``` | Play                                               | Preview the audio by Playing it ... usually in VLCplayer*                                                     | 
+| - ```Q``` | enQueue                                            | enQueue the song into WinAmp for the purpose of previewing subtitle display**                                 | 
+| - ```S``` | is sound effect                                    | marks current file as ```[sound effect]``` to prevent transcription and ensure accurate file status reporting | 
+| - ```T``` | deleTe                                             | delete audio/transcription/lyric/log/json files with option to regenerate transcription if applicable         |
+| - ```X``` | N/A                                                | mark ALL files in folder as instrumental                                                                      | 
+| - ```Z``` | N/A                                                | mark ALL files in folder as lyric*less*                                                                       | 
+
+Lyric subsystem only:
+
+| Key       | Meaning                                            | Action                                                                                             |
+| --------- | ----------------------------                       | -------------------------------------------------------------------------------------------------- |
+| - ```A``` | Approve                                            | set the current lyric status to *APPROVED*                                                         | 
+| - ```D``` | eDit                                               | eDit current artist / song title prior to next lyric search                                        | 
+| - ```F``` | Fail                                               | skip getting lyrics for the current song or folder (i.e. choosing to fail)                         |
+| - ```G``` | Google the lyrics                                  | manually search for lyrics with google to paste them into the system                               | 
+| - ```H``` | Hand-edit                                          | eDit currently fetched lyrics in your favorite text editor                                         | 
+| - ```K``` | Skip                                               | skip getting lyrics for the current song or folder (i.e. choosing to fail)                         |
+| - ```O``` | dOwnload the lyrics                                | return to the lyric downloader and immediately try fetching lyrics again                           | 
+| - ```U``` | Unset search history                               | Unset lyric search history in case one wants to repeat a search (if prevented by internet outage)  | 
+| - ```V``` | conVert                                            | converts downloaded LRC transcriptions into TXT lyrics                                             | 
+
+Transcription/Subtitle/Karaoke subsystem only:
+
+| Key       | Meaning                                                                | Action                                                                        |
+| --------- | ----------------------------                                           | ----------------------------------------------------------------------------  |
+| - ```1``` | Retry transcription                                                    | start over and retry the current subtitle/karaoke transcription again         | 
+| - ```C``` | stretCh                                                                | time-stretch and time-slide LRC file to shape studio transcriptions to live/cover transcriptions performed at a different pace | 
+| - ```G``` | Get lyrics instead                                                     | switch back to getting lyrics prior to running transcription                  | 
+| - ```U``` | is Untranscribeable                                                    | mark audio file as Untranscribeable so that it isn’t later retried infinitely | 
+| - ```W``` | run [WhisperTimeSync](https://github.com/EtienneAb3d/WhisperTimeSync)  | resolve mis-heard AI transcriptions against valid lyrics using [WhisperTimeSync](https://github.com/EtienneAb3d/WhisperTimeSync) with our added enhancements and workflow | 
+
+* Requires ⚡ [WinAmp](https://forums.winamp.com/forum/winamp/winamp-discussion/306661-winamp-5-666-released-build-3516) ⚡ integration
+
+** If ⚡ [WinAmp](https://forums.winamp.com/forum/winamp/winamp-discussion/306661-winamp-5-666-released-build-3516) ⚡ integration is enabled, will automatically pause and unpause WinAmp (even from another computer) so that the house music (in my case) is turned off so that one can hear the file being previewed
+
+
+													                                      
 -----------------------------------------------------------------------------------------------------------------------------------------------
 
 # ⚙️ To transcribe albums/songs/playlists ⚙️
@@ -584,7 +647,7 @@ To easily delete every breadcrumb file on your computer, go into ```clean-up-AI-
 
 ### 🌟 [stretch_lrc.py](../stretch_lrc.py):
 
-!!!!!!!!!!!!! GREAT FOR LIVE SONGS AND COVERS !!!!!!!!!!!!! 
+!!!!!!!!!!!!! GREAT FOR LIVE SONGS AND COVERS !!!!!!!!!!!!!
 
 Live songs and covers frequently are assigned an LRC file (either by ```LRCget``` or *quick-lrc* mode) that actually belongs to the original studio version. This LRC almost never works correctly because the length and doesn’t match exactly, and the starting time is often offset by singer banter during live performances.
 
@@ -815,22 +878,28 @@ Add the ```fast``` parameter to skip the search & deletion of bad AI files.
 ![image](https://github.com/user-attachments/assets/61e1f155-a798-4668-945a-7d7dd2ac06dc)
 
 
-### 🌟 convert-playlist-to-only-songs-that-do-not-have-karaoke.bat {playlist} [convert-playlist-to-only-song-that-do-not-have-karaoke.bat](../convert-playlist-to-only-song-that-do-not-have-karaoke.bat):
+### 🌟 [convert-playlist-to-only-song-that-do-not-have-karaoke.bat](../convert-playlist-to-only-song-that-do-not-have-karaoke.bat) {playlist} :
 
 Creates a new playlist consisting of all the files in the original playlist that do not have karaoke sidecar files.
 It then asks if we want to start getting karaoke or lyrics for that playlist.
 
-### 🌟 convert-playlist-to-only-songs-that-do-not-have-lyrics.bat {playlist} [convert-playlist-to-only-song-that-do-not-have-lyrics.bat](../convert-playlist-to-only-song-that-do-not-have-lyrics.bat):
+### 🌟 [convert-playlist-to-only-song-that-do-not-have-lyrics.bat](../convert-playlist-to-only-song-that-do-not-have-lyrics.bat) {playlist}:
 
 Creates a new playlist consisting of all the files in the original playlist that do not have lyric sidecar files.
 Asks if we want to start getting lyrics for that playlist.
 
 
-### 🌟 subtitle-integrity-checker.bat {SRT file} [subtitle-integrity-checker.bat](../subtitle-integrity-checker.bat):
+### 🌟 [subtitle-integrity-checker.bat](../subtitle-integrity-checker.bat) {SRT file} :
 
 Checks a SRT file for overlapping timestamps, and zero-time timestamps, and displays results in a graph.
 Used to further reconcile *WhisperTimeSync*-reconciled SRT files.
 (Good lyrics ➜ Bad SRT ➜ WhisperTimeSync fixes SRT based on lyrics ➜ subtitle-integrity-checker looks for things WhisperTimeSync may have screwed up (since it does).
+
+
+### 🌟 [subtitle_length.py](../subtitle_length.py) {SRT or LRC file} :
+
+Returns audio duration of LRC/SRT subtitle file
+
 
 
 
@@ -971,21 +1040,6 @@ Put ```{{{{QUOTE}}}}``` in the argument to turn it into a quote mark in the fina
 
 The Perl version is 30% faster than Python version, but less reliable, especially with emoji & weirder file encodings.
 
-### 🌟 [lyric-postprocessor.pl](../lyric-postprocessor.pl):
-
-Downloaded lyrics postprocessor. Cleans up non-lyric trash that inevitably creeps into these.
-
-Add ```-1``` option to turn on  squishing of lyrics into a single line for use in AI prompts
-Add ```-0``` option to turn off squishing of lyrics into a single line for use in AI prompts [DEFAULT]
-Add ```-A``` option to display allllll the lines,  not just the unique lines [DEFAULT]
-Add ```-U``` option to display only unique lines, instead of using all lines
-Add ```-L``` option to turn on  lyric-specific processing [DEFAULT]
-Add ```-N``` option to turn off lyric-specific processing 
-Add ```-N``` option to turn off adding a character to the end of each line 
-Add ```-L``` option to turn on  adding a character to the end of each line [DEFAULT]***
-
-***[character is “.” for this system, to manipulate WhisperAI’s ```--sentence``` parameter into breaking subtitles at lyrical lines and to compensate for lyrics not usually being punctuated]
-
 </details>
 
 -----------------------------------------------------------------------------------------------------------------------------------------------
@@ -1003,7 +1057,23 @@ The lyric downloader we use for Genius saves lyrics as a ```JSON file```. This e
 
 ### 🌟 [lyric-postprocessor.pl](../lyric-postprocessor.pl):
 
-A lyric postprocessor that removes tons of junk from downloaded lyrics, only shows unique lines (to help fit into WhisperAI’s 224-token prompt limit), and smushes all the lyrics into a single line (for use as a command line option). Started as a spiritual fork of ``uniq``` that doesn’t require file sorting (to avoid using up the 224 max tokens for WhisperAI with repeating lyrics), and grew into full-fledged lyric preprocessor that does much lyric massaging. Including putting a period at the end of each line, which is later removed by our subtitle postprocessor.
+Downloaded lyrics postprocessor. Cleans up non-lyric trash that inevitably creeps into these.
+
+Add ```-L``` option to turn on  adding a character to the end of each line [DEFAULT]***
+Add ```-N``` option to turn off adding a character to the end of each line 
+Add ```-1``` option to turn on  squishing of lyrics into a single line for use in AI prompts
+Add ```-0``` option to turn off squishing of lyrics into a single line for use in AI prompts [DEFAULT]
+Add ```-A``` option to display allllll the lines,  not just the unique lines [DEFAULT]
+Add ```-U``` option to display only unique lines, instead of using all lines
+Add ```-L``` option to turn on  lyric-specific processing [DEFAULT]
+Add ```-N``` option to turn off lyric-specific processing 
+
+***[character is “.” for this system, to manipulate WhisperAI’s ```--sentence``` parameter into breaking subtitles at lyrical lines and to compensate for lyrics not usually being punctuated. This is VERY VERY VERY important to getting line breaks in places that do not make sense. Credit to my wife for her idea of “Why not put invisible periods at the end of each line” when I was trying to figure out how to make the output look less cringey.  Invisible periods don’t exist, but we add periods prior to input to WhisperAI, and then remove the periods later with our subtitle postprocessor]
+
+
+### 🌟 [lrc-postprocessor.pl](../lrc-postprocessor.pl):
+
+Postprocessor for LRC files downloaded with the quick-LRC-download subsystem.
 
 
 ### 🌟 [subtitle-postprocessor.pl](../subtitle-postprocessor.pl):
@@ -1015,16 +1085,14 @@ The final subtitle postprocessor—originally called ```remove-period-at-ends-of
 This also also has some extra karaoke postprocessing functionality slipped in:
     - de-censoring some curse words that WhisperAI censors (suppress this with ```--leave-censorship``` or ```-L```)
     - removing any line that is a common WhisperAI hallucination
+    - fixing common character encoding issues
+
 
 ### 🌟 [fix-subtitles-for-currently-playing-song.bat](../fix-subtitles-for-currently-playing-song.bat) [or ```fts``` for “fix these subtitles”]:
 
 If ⚡ WinAmp 🦙 Integration is enabled, runs [subtitle-postprocessor.pl](../subtitle-postprocessor.pl) on the currently playing song.
 
 
-
-### 🌟 [lrc-postprocessor.pl](../lrc-postprocessor.pl):
-
-Postprocessor for [downloaded] LRC files.
 
 
 </details>
@@ -1247,17 +1315,17 @@ Technically should be called “```audio_file_index.bat```”... but isn’t.
 
 
 TODO: update about section to include list of obstacles while doing this -- hallucination-prevention was tough. so was encoding. and concurrency. instrumentals. etc. Live songs sung at a different pace.
-NOTE: New hallucation patterns must be added to: delete-bad-AI-transcriptions.bat lyric-postprocessor.pl subtitle-postprocessor.pl remove-period-at-ends-of-lines.pl
-			NEW HALLUCNATION: I’m sorry, I don’t know what I’m doing - very uncommon? do we bother? cover both smart/dumb apostrophes
+NOTE: New hallucation patterns must be added to: delete-bad-AI-transcriptions.bat WhisperAIProcessing.pm 
 
 TODO: mention about local repo search: c:\lyrics\M\Metallica\Metallica - One.txt search
+
+
+
 TODO: IDEA: Go thru existing lyrics & subtitles, if non-english language charcaters are found, take the line, run through translation API, then add english version in parenthesis at end of line .... But what happens with a mixed-language line then? Nothing, just treat it the same.
 
 
 
+
 TODO: search for other todos below
-
-TODO: subtitle_length.py add to docs and 
-
 
 

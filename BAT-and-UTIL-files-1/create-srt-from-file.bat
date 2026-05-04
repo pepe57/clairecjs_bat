@@ -1899,22 +1899,10 @@ rem ////////////////////////////////////////////////////////////////////////////
 
 
 
-        :divider_v001_pre_fork []
-                rem Use my pre-rendered rainbow dividers, or if they don’t exist, just generate a divider dynamically
-                set wd=%@EVAL[%_columns - 1]
-                set nm=%bat%\dividers\rainbow-%wd%.txt
-                iff exist %nm% then
-                        *type %nm%
-                        if "%1" != "NoNewline" .and. "%2" != "NoNewline" .and. "%3" != "NoNewline" .and. "%4" != "NoNewline" .and. "%5" != "NoNewline"  .and. "%6" != "NoNewline" (echos %NEWLINE%%@ANSI_MOVE_TO_COL[1])
-                else
-                        echo %@char[27][93m%@REPEAT[%@CHAR[9552],%wd%]%@char[27][0m
-                endiff
-        return
 
         :divider_v002_when_it_lived_in_other_file [opt]
                 gosub "%BAT%\get-lyrics-for-file.btm" divider %opt%
         return
-
         :divider_v003_now_lives_here_AND_in_create_lyrics_so_neither_encroach_upon_maximum_nesting_limit
         :divider [divider_param]
                 iff "1" == "%suppress_next_divider%" then
@@ -1950,11 +1938,9 @@ rem ////////////////////////////////////////////////////////////////////////////
 
                                 rem Then move to column 0/1 [which are the same column]:
                                         echos %@ANSI_MOVE_TO_COL[0] 
-
                         endiff
 
-                rem Debug:
-                        echo wtf last_divider_newline=%last_divider_newline% should we do one? >nul
+                rem Debug: echo wtf last_divider_newline=%last_divider_newline% should we do one? >nul
         return
 
 rem ////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1979,13 +1965,13 @@ rem Let user know if we were NOT succesful, then skip to the end:
                         gosub divider
                         unset /q ANSWER
                         rem TODO formatting of prompt green letters:
-                        call AskYN "Mark karaoke as failed so we don’t try again [%ansi_color_bright_green%N%ansi_color_prompt%=No, mark %italics_on%instrumental%italics_off% instead,%ansi_color_bright_green%P%ansi_color_prompt%lay it,%ansi_color_bright_green%S%ansi_color_prompt%=Mark as soundclip,%ansi_color_bright_green%U%ansi_color_prompt%ntranscribeable,%ansi_color_bright_green%!%ansi_color_prompt%=retry transcription]" no %KARAOKE_APPROVAL_WAIT_TIME% IPQ!SU I:no_instead_mark_mark_instrumental,Q:enQueue_in_winamp,P:play,S:no_instead_mark_mark_as_sound_effect,!:retry_encode_from_start,U:mark_it_as_untranscribeable
+                        call AskYN "Mark karaoke as failed so we don’t try again [%ansi_color_bright_green%N%ansi_color_prompt%=No, mark %italics_on%instrumental%italics_off% instead,%ansi_color_bright_green%P%ansi_color_prompt%lay it,%ansi_color_bright_green%S%ansi_color_prompt%=Mark as soundclip,%ansi_color_bright_green%U%ansi_color_prompt%ntranscribeable,%ansi_color_bright_green%!%ansi_color_prompt%=retry transcription]" no %KARAOKE_APPROVAL_WAIT_TIME% IPQ1SU I:no_instead_mark_mark_instrumental,Q:enQueue_in_winamp,P:play,S:no_instead_mark_mark_as_sound_effect,1:retry_encode_from_start,U:mark_it_as_untranscribeable
                                 gosub check_for_answer_of_I "%@UNQUOTE["%INPUT_FILE%"]"
                                 gosub check_for_answer_of_S "%@UNQUOTE["%INPUT_FILE%"]"
                                 gosub check_for_answer_of_P "%@UNQUOTE["%INPUT_FILE%"]"
                                 gosub check_for_answer_of_Q "%@UNQUOTE["%INPUT_FILE%"]"
                                 if  "U" == "%ANSWER%" gosub   ask_if_untranscribeable "%@UNQUOTE["%INPUT_FILE%"]"
-                                if  "!" == "%ANSWER%" goto /i go_here_for_encoding_retries
+                                if  "1" == "%ANSWER%" goto /i go_here_for_encoding_retries
                                 if  "P" == "%ANSWER%" .or. "Q" == "%ANSWER%" .or. "S" == "%ANSWER%" goto /i ask_about_instrumental_1500
                                 iff "Y" == "%ANSWER%" .or. "I" == "%ANSWER%" then
                                       echo Tru`>%@`UNQUOTE["%INPUT_FILE%"]:karaoke_failed" 🐐🐐🐐🐐🐐🐐🐐>nul
@@ -2366,21 +2352,19 @@ goto /i skip_subroutines
                 iff "1" == "%karaoke_approval_asked%" .and.  "1" == "%karaoke_edit_refused%" then
                         rem DEBUG:call subtle "Not asking to approve karaoke again because we already asked and a karaoke edit was refused"
                 else
-                        @call askyn  "Approve/edit karaoke file? [=%ansi_color_bright_green%D%ansi_color_prompt%isapprove,dele%ansi_color_bright_green%T%ansi_color_prompt%e,%ansi_color_bright_green%P%ansi_color_prompt%lay,E=%ansi_color_bright_green%E%ansi_color_prompt%dit karaoke,W=%ansi_color_bright_green%W%ansi_color_prompt%hisperTimeSync,%ansi_color_bright_green%R%ansi_color_prompt%etry transcription]" no %KARAOKE_APPROVAL_WAIT_TIME% notitle ABDEIP1QTWM  E:edit_karaoke,Q:enQueue_in_winamp,P:Play_It,D:DISapprove_them,W:Whisper_Time_sync_fix,A:Yes_approve_it,I:mark_instrumental,T:delete__it,M:restart_winamp,B:regenerate_karaoke,1:retry_the_transcription
+                        @call askyn  "Approve/edit karaoke file? [=%ansi_color_bright_green%D%ansi_color_prompt%isapprove,dele%ansi_color_bright_green%T%ansi_color_prompt%e,%ansi_color_bright_green%P%ansi_color_prompt%lay,E=%ansi_color_bright_green%E%ansi_color_prompt%dit karaoke,W=%ansi_color_bright_green%W%ansi_color_prompt%hisperTimeSync,%ansi_color_bright_green%R%ansi_color_prompt%etry transcription]" no %KARAOKE_APPROVAL_WAIT_TIME% notitle ADEIP1QTWM  E:edit_karaoke,Q:enQueue_in_winamp,P:Play_It,D:DISapprove_them,W:Whisper_Time_sync_fix,A:Yes_approve_it,I:mark_instrumental,T:delete__it,M:restart_winamp,1:retry_the_transcription
                 endiff
                 set karaoke_approval_asked=1
                 set karaoke_edit_already_asked=1
                 if "1" == "%DEBUG_KARAOKE_APPROVAL%" call debug "[B] karaoke_edit_already_asked & karaoke_approval_asked both set to 1" silent
-                rem “1” for retry:
-                        if  "1" == "%ANSWER%" goto /i go_here_for_encoding_retries
                 rem “T":
                         set HOLD_ANSWER_2006=%ANSWER%
                         gosub check_for_answer_of_T "%@UNQUOTE["%INPUT_FILE%"]"
                         rem done below: if "T" == "%HELD_ANSWER_2006%" goto :ask_about_karaoke_approval
-                rem “I", “E", “B", “M":
+                rem “I", “E", “1", “M":
                         gosub check_for_answer_of_I "%@UNQUOTE["%INPUT_FILE%"]"
                         gosub check_for_answer_of_E "%SRT_FILE%" "%TXT_FILE%"
-                        gosub check_for_answer_of_B
+                        gosub check_for_answer_of_1
                         gosub check_for_answer_of_M_to_restart_winamp
                 rem “W":
                         set ANSWER=%HOLD_ANSWER_2006%
@@ -2444,11 +2428,14 @@ goto /i skip_subroutines
                                 set OKAY_TO_START_TRANSCRIPTION=0
                         )
         return
-        :check_for_answer_of_B [opt1]                        
-                iff "B" == "%ANSWER%" then
-                        goto :regenerate_karaoke
-                endiff
-        return
+        :check_for_answer_of_1 [opt1]                        
+                if  "1" == "%ANSWER%" goto /i go_here_for_encoding_retries
+        :return
+        rem 2026 removal GOAT: :check_for_answer_of_B [opt1]                        
+        rem 2026 removal GOAT:         iff "B" == "%ANSWER%" then
+        rem 2026 removal GOAT:                 goto :regenerate_karaoke
+        rem 2026 removal GOAT:         endiff
+        rem 2026 removal GOAT: return
         :check_for_answer_of_dollar [opt1]                        
                 rem DEBUG: call debug "Checking for answer of $" silent
                 if "$" != "%ANSWER%" return
@@ -2531,7 +2518,7 @@ goto /i skip_subroutines
                 if "M" == "%ANSWER%" call restart-winamp
         return
         :check_for_answer_of_M_to_rename_file
-        :check_for_answer_of_M [opt]                        
+        :check_for_answer_of_M_prior_to_20260504_merge [opt]                        
                 if "M" != "%ANSWER%" return
 
                 set file_to_use=%INPUT_FILE%
@@ -2549,6 +2536,44 @@ goto /i skip_subroutines
                 set   SONGFILE=%LAST_RENAMED_TO%
                 set INPUT_FILE=%LAST_RENAMED_TO%
                 unset /q %RN_PERFORMED%
+        return
+        :check_for_answer_of_M [opt]           
+                rem Return if “M” was not the selected answer:             
+                        if "M" != "%ANSWER%" return
+
+                rem Determine our file to use —- hopefully a parameter was passed:
+                        if exist "%@UNQUOTE["%INPUT_FILE%"] set file_to_use=%INPUT_FILE%
+                        if exist "%@UNQUOTE["%AUDIO_FILE%"] set file_to_use=%AUDIO_FILE%
+                        set opt_1=%@UNQUOTE["%opt%"]
+                        if exist "%opt_1%" set file_to_use=%opt_1%
+
+
+                rem Check that the file exists to be renamed in the first place:
+                        if exist "%FILE_TO_USE%" goto cfaom_rn_the_file
+                        call warning "₈File doesn’t seem to exist: %lq%%italics_on%%FILE_TO_USE%%italics_off%%rq%"
+                        return
+
+                rem Handle the renaming of the file, as well as the sidecar files, with our rn.bat script, which
+                rem also stores return values in the RN_PERFORMED and LAST_RENAMED_TO environment variables:
+                        :cfaom_rn_the_file
+                        call rn "%FILE_TO_USE%" 
+
+                rem If no filename change was actually made, we are done:
+                        if "1" != "%RN_PERFORMED%" return
+                        unset /q    RN_PERFORMED
+
+                rem If the filename was changed, we need to update some of our internal variables:
+                        iff "" != "%LAST_RENAMED_TO%" then
+                                set AUDIO_FILE=%LAST_RENAMED_TO%
+                                set INPUT_FILE=%LAST_RENAMED_TO%
+                                set   SONGFILE=%LAST_RENAMED_TO%
+                                set LYRIC_FILE=%@NAME["%AUDIO_FILE%"].txt
+                                set   SRT_FILE=%@NAME["%AUDIO_FILE%"].srt
+                                set   LRC_FILE=%@NAME["%AUDIO_FILE%"].lrc
+                        endiff
+
+                rem So far, this isn’t very tested, and has sometimes had bugs, so let’s warn about that:   [TODO:RESOLVED?]
+                call warning "This Renaming may break future operations..." %+ pause
         return
         :check_for_answer_of_P [opt]                        
                 on break resume
