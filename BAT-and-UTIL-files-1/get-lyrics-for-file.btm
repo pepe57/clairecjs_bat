@@ -1468,7 +1468,8 @@ rem Check if we already have a LRC/SRT file but no TXT file
                         rem Review it! We auto-approved tons of these and left a horrible mess for ourselves by not adding this review step in til 2025/04/02
                                 rem pause  set JUST_GENERATED_LYRICS=“%JUST_GENERATED_LYRICS%” ... TXT_SIDECAR_FILENAME=“%TXT_SIDECAR_FILENAME%”
                                 if "1" != "%JUST_GENERATED_LYRICS%" goto /i endif_903
-                                        set tmpmsg1=%@RAINBOW[Freshly generated from]
+                                        gosub divider
+                                        set tmpmsg1=%@RAINBOW[Freshly generated from] ``
                                         set tmpmsg2=%italics_on%
                                         set tmpmsg3=%@RAINBOW[%JUST_CONVERTED_FROM%]
                                         set tmpmsg4=%italics_off%
@@ -1478,6 +1479,7 @@ rem Check if we already have a LRC/SRT file but no TXT file
                                         :Ask_Again_845
                                         unset /q ANSWER hold_answer
                                         if not defined LONGEST_POSSIBLE_HAND_EDIT_TIME_IN_SECONDS set LONGEST_POSSIBLE_HAND_EDIT_TIME_IN_SECONDS=800
+                                        gosub divider
                                         call AskYn "Are these lyrics%dash%%blink_on%converted from %italics_on%%just_converted_from%%italics_off%%blink_off%%dash%acceptible" No %LONGEST_POSSIBLE_HAND_EDIT_TIME_IN_SECONDS% ADHILOPQ A:approve_the_lyrics,D:delete_sidecars,I:mark_instrumental,L:mark_lyriclessness,O:dOwnload_new_lyrics,Q:enQueue_in_winamp,P:play_file,H:hand-edit
                                         rem Preserve answer in case any subroutines call AskYN and re-set it:
                                                 set OUR_LAST_ANSWER_HERE=%ANSWER%
@@ -5312,7 +5314,7 @@ echo "%blink_on%set JUST_RENAMED_TO_%nature%=1 this is testing using %%nature%% 
                 if exist %opt% set FILE_TO_GET_LYRIC_STATUS_OF="%@UNQUOTE["%opt%"]"
                 rem echo 🐐 %blink_on% %ansi_color_orange% getting lyric status of “%FILE_TO_GET_LYRIC_STATUS_OF%” %blink_off% 
                 if exist "%FILE_TO_GET_LYRIC_STATUS_OF%" goto /i we_good
-                        echo %ansi_color_warning_soft%%star% Lyric file doesn’t yet exist: %faint_on%“%italics_on%%FILE_TO_GET_LYRIC_STATUS_OF%%italics_off%”%faint_off% %star%
+                        echo %ansi_color_warning_soft%%star% Lyric file doesn’t exist:   %faint_on%“%italics_on%%FILE_TO_GET_LYRIC_STATUS_OF%%italics_off%”%faint_off% %star%
                         set LYRIC_STATUS=DOES_NOT_EXIST
                         return
                 :we_good
