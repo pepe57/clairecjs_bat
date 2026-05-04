@@ -212,8 +212,8 @@ Both subsystems:
 | ```I``` | Is Instrumental                                    | marks current file as ```[instrumental]``` to prevent transcription and ensure accurate file status reporting | 
 | ```L``` | is Lyric*less*                                     | marks current file as lyric*less* which means lyrics are impossible to find, so stop trying                   | 
 | ```M``` | renaMe                                             | rename the current file and corresponding sidecar files [can also achieve this with ```I``` and ```S```]      | 
-| ```P``` | Play                                               | Preview the audio by Playing it ... usually in VLCplayer[^1]                                                  | 
-| ```Q``` | enQueue                                            | enQueue the song into WinAmp for the purpose of previewing subtitle display[^2]                               | 
+| ```P``` | Play                                               | Preview the audio by Playing it ... usually in VLCplayer¹                                                     | 
+| ```Q``` | enQueue                                            | enQueue the song into WinAmp for the purpose of previewing subtitle display²                                  | 
 | ```S``` | is sound effect                                    | marks current file as ```[sound effect]``` to prevent transcription and ensure accurate file status reporting | 
 | ```T``` | deleTe                                             | delete audio/transcription/lyric/log/json files with option to regenerate transcription if applicable         |
 | ```X``` | mark all as instrumental                           | mark ALL files in folder as instrumental                                                                      | 
@@ -246,9 +246,9 @@ Transcription/Subtitle/Karaoke subsystem only:
 | ```U``` | is Untranscribeable                                                    | mark audio file as Untranscribeable so that it isn’t later retried infinitely | 
 | ```W``` | run [WhisperTimeSync](https://github.com/EtienneAb3d/WhisperTimeSync)  | resolve mis-heard AI transcriptions against valid lyrics using [WhisperTimeSync](https://github.com/EtienneAb3d/WhisperTimeSync) with our added enhancements and workflow | 
 
-[^1]: Requires ⚡ [WinAmp](https://forums.winamp.com/forum/winamp/winamp-discussion/306661-winamp-5-666-released-build-3516) ⚡ integration
+¹Requires ⚡ [WinAmp](https://forums.winamp.com/forum/winamp/winamp-discussion/306661-winamp-5-666-released-build-3516) ⚡ integration
 
-[^2]: If ⚡ [WinAmp](https://forums.winamp.com/forum/winamp/winamp-discussion/306661-winamp-5-666-released-build-3516) ⚡ integration is enabled, will automatically pause and unpause WinAmp (even from another computer) so that the house music (in my case) is turned off so that one can hear the file being previewed
+²If ⚡ [WinAmp](https://forums.winamp.com/forum/winamp/winamp-discussion/306661-winamp-5-666-released-build-3516) ⚡ integration is enabled, will automatically pause and unpause WinAmp (even from another computer) so that the house music (in my case) is turned off so that one can hear the file being previewed
 
 
 													                                      
