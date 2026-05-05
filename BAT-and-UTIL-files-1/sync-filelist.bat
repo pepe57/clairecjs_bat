@@ -1,24 +1,27 @@
 @Echo OFF
 @on break cancel
 
-::::: VALIDATE ENVIRONMENT
-    call validate-in-path frpost settemp sync-filelist-helper.pl fix-window-title fatal_error 
+rem VALIDATE ENVIRONMENT (once):
+        iff "1" != "%validated_syncfilelist%" then
+                call validate-in-path frpost settemp sync-filelist-helper.pl fix-window-title fatal_error  print-message perl
+                set  validated_syncfilelist=1
+        endiff
 
-::::: INCORRECT USAGES:
+rem INCORRECT USAGES:
 	if "%1"  ==  "" goto :Usage
 	if not exist %1 goto :SourcePlaylistDoesNotExist
 	if not isdir %2 goto :DestinationDirDoesNotExist
 
-::::: GENERATE WINDOW TITLE:
+rem GENERATE WINDOW TITLE:
 	title * Syncing files listed in: "%1" to destination: "%2 "
 
-::::: GENERATE TEMP-SCRIPT FILENAME:
+rem GENERATE TEMP-SCRIPT FILENAME:
 	rem call settemp
 	rem set TEMPBAT="%TEMP\sync-filelist-%_PID.bat"
         call set-temp-file sync_filelist_bat
         set TEMPBAT=%tmpfile%.bat
 
-::::: ASK ABOUT RANDOM FOLDER PLACEMENT:
+rem ASK ABOUT RANDOM FOLDER PLACEMENT:
         set curSetting=%@IF["%PUT_EACH_SONG_IN_RANDOM_FOLDER%" == "1",yes,no]
         iff "%3" != "NoRandomAsk" then
                 call askyn "Put each file in a randomly-named folder [D=don’t change current setting of “%curSetting%”]" no 60 d D:dont_change_current_setting_of_%curSetting%
@@ -26,7 +29,8 @@
                 if "Y" == "%ANSWER%" set PUT_EACH_SONG_IN_RANDOM_FOLDER=1
         endiff
 
-::::: CREATE AND RUN TEMP-SCRIPT:
+rem CREATE AND RUN TEMP-SCRIPT:
+        set flac=1
 	echo * sync-filelist-helper.pl "%@UNQUOTE["%1"]" "%@UNQUOTE["%2"]"
 	echo * sync-filelist-helper.pl "%@UNQUOTE["%1"]" "%@UNQUOTE["%2"]"     to %TEMPBAT
 	REM    sync-filelist-helper.pl "%@UNQUOTE["%1"]" "%@UNQUOTE["%2"]" |& tee %TEMPBAT

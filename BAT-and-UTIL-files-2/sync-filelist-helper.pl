@@ -1,23 +1,55 @@
 #!perl
 
 #USAGE: sync-filelist-helper.pl FILELIST.txt D:\DESTINATION\FOLDER\
-#USAGE:		^^^^ Generates script to copy all files from the filelist into the destination folder/directory. Includes creating folders/directories when necessary.
+#USAGE: Refer to code for controlling behavior via environment variable or via trigger file
 
 
-#HISTORY: This is the generalized 2ⁿᵈ edition of the more-specialized “sync-mp3-playlists-to-location-helper.pl”, which only sync’ed playlists, whereas this usually/also sync audio files.
+#HISTORY: This is the generalized 2ⁿᵈ edition of the more-specialized “sync-mp3-playlists-to-location-helper.pl”, which only sync’ed playlists [and not the files], whereas this usually/also sync audio files.
 
 
 
-##### CONFIGURATION:
+##### CONFIGURATION: BEHAVIOR:
 
-my $COPY                     = "*copy /u /g /h /j /k /Nst"; #set to “copy” if you must - but for me, /u makes it an update copy, which only copies if the file is newer. Significantly saves time. /g=percentage progress. /h=copy hidden, /j=restartable, /Ns=no summary ("1 file copied" suppressed), no updating JPSTREE.IDX
-my $MKDIR                    = "mkdir /s /Nt";				#set to   “md” if you must - but you're gonna need to add whatver option lets you this make multiple folders inside each other at once, i.e. creating "c:\one\two\three\four" in one command, not four.  The /Nt is a TCC-specific speedup.
-my $SLASH                    = "\\";						#set to    “/” if you must [Unix folk]
-my $ALLOW_COPY_TO_SAME_DRIVE = 0;		                    #2025/06/21 - changed this back to original inception value of 0 .... 2022/03/17 - changed this because not doing car syncs a lot lately and needed to copy stuff for Beth and doing some same-drive script testing ... original inception value was 0
-my $BACKSLASHES              = 1;						    #set to 1 if you want all filename slashes to become backslashes
+my $COPY_SIDECARS                    = 1;							#set to “1” to copy sidecar files (i.e. subtitles, art, lyrics, any file with same base but diff extension)
+my $PUT_EACH_SONG_IN_RANDOM_FOLDER   = 0;							#set to “1” for each file to be individually copied to a random folder name, which allows a smulated shuffle on the MANY standalone speakers (almost all of them) that don’t have shuffle functionality
+my $COLLAPSE_FILES_TO_ROOT_WHEN_DONE = 0;							#set to “1” to move all files to the root folder when done; useful for players that can only do random in a single folder
+my $COPY_FLACS                       = 1;							#set to “0” to not copy FLAC files, if you are dealing with an older player that doesn’t support them
 
-##### INITIALIZE LIBRARIES:
-use List::Util qw(shuffle);
+##### CONFIGURATION: INTERNALS:
+
+my $COPY                           = "*copy /u /g /h /j /k /Nst";	#set to “copy” if you must - but for me, /u makes it an update copy, which only copies if the file is newer. Significantly saves time. /g=percentage progress. /h=copy hidden, /j=restartable, /Ns=no summary ("1 file copied" suppressed), no updating JPSTREE.IDX
+my $MKDIR                          = "mkdir /s /Nt";				#set to   “md” if you must - but you're gonna need to add whatver option lets you this make multiple folders inside each other at once, i.e. creating "c:\one\two\three\four" in one command, not four.  The /Nt is a TCC-specific speedup.
+my $SLASH                          = "\\";							#set to    “/” if you must [Unix folk]
+my $ALLOW_COPY_TO_SAME_DRIVE       = 0;								#set to “1" if you want to allow copy to the same harddrive, WHICH CAN BE REALLY BAD, this was set to 0 for my own protection...  HISTORY: 2025/06/21 - changed this back to original inception value of 0 after a disaster .... 2022/03/17 - changed this to 1 for testing purposes ... original pre-2022 inception value was 0
+my $BACKSLASHES                    = 1;								#set to 1 if you want all filename slashes to be turned into backslashes (usually better for Windows)
+
+
+# ✨✨✨✨✨✨✨ ALTERNATE WAYS TO PASS PARAMETERS - BY ENVIRONMENT VARIABLE AND BY TRIGGER FILE ✨✨✨✨✨✨✨
+# ✨✨✨✨✨✨✨ ALTERNATE WAYS TO PASS PARAMETERS - BY ENVIRONMENT VARIABLE AND BY TRIGGER FILE ✨✨✨✨✨✨✨
+# ✨✨✨✨✨✨✨ ALTERNATE WAYS TO PASS PARAMETERS - BY ENVIRONMENT VARIABLE AND BY TRIGGER FILE ✨✨✨✨✨✨✨
+
+##### ENVIRONMENT VARIABLE BEHAVIOR OVERRIDES:
+if ("1" == "$ENV{PUT_EACH_SONG_IN_RANDOM_FOLDER}"       ) { $PUT_EACH_SONG_IN_RANDOM_FOLDER = 1; }			
+if ("1" == "$ENV{DO_PUT_EACH_SONG_IN_RANDOM_FOLDER}"    ) { $PUT_EACH_SONG_IN_RANDOM_FOLDER = 1; }			
+if ("1" == "$ENV{DONT_PUT_EACH_SONG_IN_RANDOM_FOLDER}"  ) { $PUT_EACH_SONG_IN_RANDOM_FOLDER = 0; }			
+if ("1" == "$ENV{DO_NOT_PUT_EACH_SONG_IN_RANDOM_FOLDER}") { $PUT_EACH_SONG_IN_RANDOM_FOLDER = 0; }			
+if ("1" == "$ENV{COPY_FLACS}"                           ) { $COPY_FLACS                     = 1; }
+if ("1" == "$ENV{DO_COPY_FLACS}"                        ) { $COPY_FLACS                     = 1; }
+if ("1" == "$ENV{DONT_COPY_FLACS}"                      ) { $COPY_FLACS                     = 0; }
+if ("1" == "$ENV{DO_NOT_COPY_FLACS}"                    ) { $COPY_FLACS                     = 0; }
+if ("1" == "$ENV{COPY_SIDECARS}"                        ) { $COPY_SIDECARS                  = 1; }
+if ("1" == "$ENV{DO_COPY_SIDECARS}"                     ) { $COPY_SIDECARS                  = 1; }
+if ("1" == "$ENV{DONT_COPY_SIDECARS}"                   ) { $COPY_SIDECARS                  = 0; }
+if ("1" == "$ENV{DO_NOT_COPY_SIDECARS}"                 ) { $COPY_SIDECARS                  = 0; }
+
+##### GET FILESYSTEM ARGUMENTS:
+if (-e "$destinationDriveLetter:\__ mp3 sync option - collapse __") { $COLLAPSE_FILES_TO_ROOT_WHEN_DONE = 1; }
+if (-e "$destinationDriveLetter:\__ each song in random folder __") { $PUT_EACH_SONG_IN_RANDOM_FOLDER   = 1; }
+
+# ✨✨✨✨✨✨✨ ALTERNATE WAYS TO PASS PARAMETERS - BY ENVIRONMENT VARIABLE AND BY TRIGGER FILE ✨✨✨✨✨✨✨
+# ✨✨✨✨✨✨✨ ALTERNATE WAYS TO PASS PARAMETERS - BY ENVIRONMENT VARIABLE AND BY TRIGGER FILE ✨✨✨✨✨✨✨
+# ✨✨✨✨✨✨✨ ALTERNATE WAYS TO PASS PARAMETERS - BY ENVIRONMENT VARIABLE AND BY TRIGGER FILE ✨✨✨✨✨✨✨
+
 
 ##### GET COMMAND-LINE ARGUMENTS:
 my $filelist               =  $ARGV[0];
@@ -29,24 +61,13 @@ my $destinationDriveLetter =  $destination;
    $destinationDriveLetter =~ s/"$//g;
    $destinationDriveLetter =~ s/^(.).*$/$1/;		#just the letter, no colon afterward
 
-##### GET ENVIRONMENT ARGUMENTS:
-my                         $FLAC = 1;
-if ("0" == "$ENV{FLAC}") { $FLAC = 0; }
-my                                                   $PUT_EACH_SONG_IN_RANDOM_FOLDER = 0;
-if ("1" == "$ENV{PUT_EACH_SONG_IN_RANDOM_FOLDER}") { $PUT_EACH_SONG_IN_RANDOM_FOLDER = 1; }			#GOATGOATGOAT make this do a thing
-
-##### GET FILESYSTEM ARGUMENTS:
-my $COLLAPSE=0; 
-if (-e "$destinationDriveLetter:\__ mp3 sync option - collapse __") { $COLLAPSE                       = 1; }
-if (-e "$destinationDriveLetter:\__ each song in random folder __") { $PUT_EACH_SONG_IN_RANDOM_FOLDER = 1; }
-
 ##### VALIDATE COMMAND-LINE ARGUMENTS:
 if (!-e $filelist)    { die("FATAL ERROR: $filelist"    . "doesn't exist!\nBe careful! Some devices are case-sensitive!\n\n"); }
 if (!-d $destination) { die("FATAL ERROR: $destination" . "doesn't exist!\nBe careful! Some devices are case-sensitive!\n\n"); }
 
 ##### DETERMINE FOLDER DIVIDER CHARACTER:
-my $DIVIDER                 ="/" ;
-if ($BACKSLASHES) { $DIVIDER="\\"; } 
+my $DIVIDER                  = "/" ;
+if ($BACKSLASHES) { $DIVIDER = "\\"; } 
 
 ##### READ IN FILELIST:
 open      (FILELIST,"$filelist") || die("FATAL ERROR: could not open $filelist\n\n");
@@ -65,10 +86,11 @@ my $driveLetterBefore="";
 my %FOLDERS_CREATED=();
 my @QUEUEDCOMMANDS =();
 print "\@Echo OFF\n";
-print "call car.bat\n";
-print ":REM: destinationDrive is \"$destinationDriveLetter\"\n";
-print "\n\%COLOR_IMPORTANT\% \%+ echo * Making directories... \%+ \%COLOR_NORMAL\% \n\n";
+print "call car.bat\n";		# protection against filenames with caret (“^”) symbol in them 
+print "rem * destinationDrive is \"$destinationDriveLetter\"\n";
+print "\n\echo \%ANSI_COLOR_IMPORTANT\%* Making directories...\%ANSI_COLOR_NORMAL\% \n\n";
 my $file;
+my $file_without_extension;
 my $filenum=0;
 foreach $file (@FILES) {
 	next if $file =~ /^#EXT/;
@@ -85,15 +107,28 @@ foreach $file (@FILES) {
 	$fileonly =~ s/^(.*[\\\/])([^\\\/]*$)/$2/i;
 	$file =~ s/^([\\\/])/C:$1/;									    #add C: to beginning of entries with no drive letter - THIS COULD BE VERY PROBLEMATIC IN THE LONG RUN. MIGHT WANT TO MAKE THIS ENV-VAR CONTROLLABLE LATER, IF THAT BECOMES A PROBLEM.
 
+	$file_without_extension = $file;
+	$file_without_extension =~ s/\..{2,5}$//g;
+	#DEBUG: print "rem File without extension is $file_without_extension\n";
+
 	##### Transform source folder into destination folder:			#UPDATES TO CODE GENERALLY WILL BE IN THIS SECTION
-		##### WARNING! CLIOVIRONMENT REQUIRES ANY UPDATES TO BELOW TO ALSO BE MADE TO SYNC-MP3-PLAYLISTS-TO-LOCATION-HELPER.PL, which is the generalized/2nd version of this
-		##### WARNING! CLIOVIRONMENT REQUIRES ANY UPDATES TO BELOW TO ALSO BE MADE TO SYNC-MP3-PLAYLISTS-TO-LOCATION-HELPER.PL, which is the generalized/2nd version of this
-		##### WARNING! CLIOVIRONMENT REQUIRES ANY UPDATES TO BELOW TO ALSO BE MADE TO SYNC-MP3-PLAYLISTS-TO-LOCATION-HELPER.PL, which is the generalized/2nd version of this
-		##### WARNING! CLIOVIRONMENT REQUIRES ANY UPDATES TO BELOW TO ALSO BE MADE TO SYNC-MP3-PLAYLISTS-TO-LOCATION-HELPER.PL, which is the generalized/2nd version of this
-		##### WARNING! CLIOVIRONMENT REQUIRES ANY UPDATES TO BELOW TO ALSO BE MADE TO SYNC-MP3-PLAYLISTS-TO-LOCATION-HELPER.PL, which is the generalized/2nd version of this
-		##### WARNING! CLIOVIRONMENT REQUIRES ANY UPDATES TO BELOW TO ALSO BE MADE TO SYNC-MP3-PLAYLISTS-TO-LOCATION-HELPER.PL, which is the generalized/2nd version of this
-		##### WARNING! CLIOVIRONMENT REQUIRES ANY UPDATES TO BELOW TO ALSO BE MADE TO SYNC-MP3-PLAYLISTS-TO-LOCATION-HELPER.PL, which is the generalized/2nd version of this
-		##### WARNING! CLIOVIRONMENT REQUIRES ANY UPDATES TO BELOW TO ALSO BE MADE TO SYNC-MP3-PLAYLISTS-TO-LOCATION-HELPER.PL, which is the generalized/2nd version of this
+		##### WARNING! CLAIREVIRONMENT [sorta kinda] REQUIRES ANY UPDATES TO BELOW TO ALSO BE MADE TO SYNC-MP3-PLAYLISTS-TO-LOCATION-HELPER.PL, which is the original deprecated version of this
+		##### WARNING! CLAIREVIRONMENT [sorta kinda] REQUIRES ANY UPDATES TO BELOW TO ALSO BE MADE TO SYNC-MP3-PLAYLISTS-TO-LOCATION-HELPER.PL, which is the original deprecated version of this
+		##### WARNING! CLAIREVIRONMENT [sorta kinda] REQUIRES ANY UPDATES TO BELOW TO ALSO BE MADE TO SYNC-MP3-PLAYLISTS-TO-LOCATION-HELPER.PL, which is the original deprecated version of this
+		##### WARNING! CLAIREVIRONMENT [sorta kinda] REQUIRES ANY UPDATES TO BELOW TO ALSO BE MADE TO SYNC-MP3-PLAYLISTS-TO-LOCATION-HELPER.PL, which is the original deprecated version of this
+		##### WARNING! CLAIREVIRONMENT [sorta kinda] REQUIRES ANY UPDATES TO BELOW TO ALSO BE MADE TO SYNC-MP3-PLAYLISTS-TO-LOCATION-HELPER.PL, which is the original deprecated version of this
+		##### WARNING! CLAIREVIRONMENT [sorta kinda] REQUIRES ANY UPDATES TO BELOW TO ALSO BE MADE TO SYNC-MP3-PLAYLISTS-TO-LOCATION-HELPER.PL, which is the original deprecated version of this
+		##### WARNING! CLAIREVIRONMENT [sorta kinda] REQUIRES ANY UPDATES TO BELOW TO ALSO BE MADE TO SYNC-MP3-PLAYLISTS-TO-LOCATION-HELPER.PL, which is the original deprecated version of this
+		##### WARNING! CLAIREVIRONMENT [sorta kinda] REQUIRES ANY UPDATES TO BELOW TO ALSO BE MADE TO SYNC-MP3-PLAYLISTS-TO-LOCATION-HELPER.PL, which is the original deprecated version of this
+		##### WARNING! CLAIREVIRONMENT [sorta kinda] REQUIRES ANY UPDATES TO BELOW TO ALSO BE MADE TO SYNC-MP3-PLAYLISTS-TO-LOCATION-HELPER.PL, which is the original deprecated version of this
+		##### WARNING! CLAIREVIRONMENT [sorta kinda] REQUIRES ANY UPDATES TO BELOW TO ALSO BE MADE TO SYNC-MP3-PLAYLISTS-TO-LOCATION-HELPER.PL, which is the original deprecated version of this
+		##### WARNING! CLAIREVIRONMENT [sorta kinda] REQUIRES ANY UPDATES TO BELOW TO ALSO BE MADE TO SYNC-MP3-PLAYLISTS-TO-LOCATION-HELPER.PL, which is the original deprecated version of this
+		##### WARNING! CLAIREVIRONMENT [sorta kinda] REQUIRES ANY UPDATES TO BELOW TO ALSO BE MADE TO SYNC-MP3-PLAYLISTS-TO-LOCATION-HELPER.PL, which is the original deprecated version of this
+		##### WARNING! CLAIREVIRONMENT [sorta kinda] REQUIRES ANY UPDATES TO BELOW TO ALSO BE MADE TO SYNC-MP3-PLAYLISTS-TO-LOCATION-HELPER.PL, which is the original deprecated version of this
+		##### WARNING! CLAIREVIRONMENT [sorta kinda] REQUIRES ANY UPDATES TO BELOW TO ALSO BE MADE TO SYNC-MP3-PLAYLISTS-TO-LOCATION-HELPER.PL, which is the original deprecated version of this
+		##### WARNING! CLAIREVIRONMENT [sorta kinda] REQUIRES ANY UPDATES TO BELOW TO ALSO BE MADE TO SYNC-MP3-PLAYLISTS-TO-LOCATION-HELPER.PL, which is the original deprecated version of this
+		##### WARNING! CLAIREVIRONMENT [sorta kinda] REQUIRES ANY UPDATES TO BELOW TO ALSO BE MADE TO SYNC-MP3-PLAYLISTS-TO-LOCATION-HELPER.PL, which is the original deprecated version of this
+		##### WARNING! CLAIREVIRONMENT [sorta kinda] REQUIRES ANY UPDATES TO BELOW TO ALSO BE MADE TO SYNC-MP3-PLAYLISTS-TO-LOCATION-HELPER.PL, which is the original deprecated version of this
 
 
 
@@ -107,45 +142,27 @@ foreach $file (@FILES) {
 	$newFolder =~ s/[A-Z]?:?[\\\/]media[\\\/]mp3-processing[\\\/]check4norm[\\\/]changerrecent[\\\/]/$destination/gi;
 	$newFolder =~ s/[A-Z]?:?[\\\/]media[\\\/]mp3-processing[\\\/]CHECK4~1[\\\/]changerrecent[\\\/]/$destination/gi;
 	$newFolder =~ s/[A-Z]?:?[\\\/]media[\\\/]MP3-PR~1[\\\/]CHECK4~1[\\\/]changerrecent[\\\/]/$destination/gi;
-
 	$newFolder =~ s/[A-Z]?:?[\\\/]media[\\\/]mp3-processing[\\\/]check4norm[\\\/]NEXT[\\\/]/$destination/gi;
-
 	$newFolder =~ s/[A-Z]?:?[\\\/]media[\\\/]mp3-processing[\\\/]check4norm[\\\/]NEXT.INPROGRESS[\\\/]/$destination/gi;
 	$newFolder =~ s/[A-Z]?:?[\\\/]media[\\\/]mp3-processing[\\\/]CHECK4~1[\\\/]NEXT.INPROGRESS[\\\/]/$destination/gi;
 	$newFolder =~ s/[A-Z]?:?[\\\/]media[\\\/]MP3-PR~1[\\\/]CHECK4~1[\\\/]NEXT.INPROGRESS[\\\/]/$destination/gi;
-
 	$newFolder =~ s/[A-Z]?:?[\\\/]Converted Audio Files[\\\/]NEXT.INPROGRESS[\\\/]/$destination/gi;
-
 	$newFolder =~ s/[A-Z]?:?[\\\/]new[\\\/]/$destination/gi;
-
-
 	$newFolder =~ s/[A-Z]?:?[\\\/]media[\\\/]mp3-processing[\\\/]check4norm[\\\/]/$destination/gi;
 	$newFolder =~ s/[A-Z]?:?[\\\/]media[\\\/]mp3-processing[\\\/]CHECK4~1[\\\/]/$destination/gi;
 	$newFolder =~ s/[A-Z]?:?[\\\/]media[\\\/]MP3-PR~1[\\\/]CHECK4~1[\\\/]/$destination/gi;
-
 	$newFolder =~ s/[A-Z]?:?[\\\/]media[\\\/]mp3-processing[\\\/]READY-FOR-TAGGING[\\\/]in base attrib correctly,but untagged \(KEEP IN THIS FOLDER WHEN MOVING TO TESTING\)/$destination/gi;
 	$newFolder =~ s/[A-Z]?:?[\\\/]media[\\\/]mp3-processing[\\\/]READY-FOR-TAGGING[\\\/]/$destination/gi;	
-
-
 	$newFolder =~ s/[\\\/]Converted Audio Files[\\\/]/\\/gi;
 	$newFolder =~ s/[\\\/]NEXT.INPROGRESS[\\\/]/\\/gi;
-
-
 	$newFolder =~ s/[A-Z]?:?[\\\/]CHECK4~1[\\\/]NEXT[\\\/]/$destination/gi;
 	$newFolder =~ s/[A-Z]?:?[\\\/]CHECK4~1[\\\/]NEXT.INPROGRESS[\\\/]/$destination/gi;
 	$newFolder =~ s/[A-Z]?:?[\\\/]CHECK4~1[\\\/]NEXT-A~1[\\\/]/$destination/gi;
 	$newFolder =~ s/[A-Z]?:?[\\\/]CHECK4~1[\\\/]/$destination/gi;
-
 	$newFolder =~ s/[A-Z]?:?[\\\/]mp3/$destination/gi;		#20140819 moved to end
-
 	$newFolder =~ s/[\\\/][\\\/]/$SLASH/g;					#fix extra slash deposits made by anything above
 
 	##### Because we don't branch for each of the above substitutions, sometimes we end up with the target folder prefixing twice:
-	#my $destinationregex = quotemeta($destination);
-	#$newFolder =~ s/$destination$destination/$destination/;
-	#$newFolder =~ s/$destination$destination/$destination/;		#technically, this should all be a while(), 
-	#$newFolder =~ s/$destination$destination/$destination/;		#but who wants to deal with stopping infinite loops?
-	#$newFolder =~ s/$destination$destination/$destination/;
 	$newFolder =~ s/^(.*)([A-Z]:.*$)/$2/;		
 	$newFolder =~ s/\\mp3music\\/\\mp3\\/ig;
 
@@ -166,11 +183,10 @@ foreach $file (@FILES) {
 	if (!$ALLOW_COPY_TO_SAME_DRIVE) {
 		if (uc($driveLetterBefore) eq uc($driveLetterAfter)) { print "echo ERROR=copying to same drive makes no sense for $folder to $newFolder!\n\ncall alarmbeep\n\npause\n\n"; }
 	}
-	#TO FIX: \MP3-TE~1\0-BATC~1\MLP\ to \MP3-TE~1\0-BATC~1\MLP\
 
 	##### Create target filename:
-	if ($COLLAPSE==0) { $newfile =               "$newFolder$DIVIDER$fileonly"; }
-	if ($COLLAPSE==1) { $newfile = "$destinationDriveLetter:$DIVIDER$fileonly"; }
+	if ($COLLAPSE_FILES_TO_ROOT_WHEN_DONE==0) { $newfile =               "$newFolder$DIVIDER$fileonly"; }
+	if ($COLLAPSE_FILES_TO_ROOT_WHEN_DONE==1) { $newfile = "$destinationDriveLetter:$DIVIDER$fileonly"; }
 	$newfile =~ s/\\\\/\\/g;	#erase consecutive dupe folder dividers
 	$newfile =~ s/\/\//\//g;	#erase consecutive dupe folder dividers
 
@@ -205,13 +221,11 @@ foreach $file (@FILES) {
 
 	$COMMANDSET .= "if \"\%\@READY[$destinationDriveLetter:]\" == \"0\" gosub :NotReady\n";
 
-	#TRIED, BUT WAS STUPID, BECAUSE PLAYLISTS SYNC *FIRST* IN OUR SYSTEM: I want to leave 20M free for playlists, so threshold at 25M: 	#$COMMANDSET .= "if \%\@DISKFREE[$destinationDriveLetter:] lt 26214400 goto :Full\n";
 
-	#COMMANDSET .= "if not exist \"$file\" (echo. \%+ echo * WARNING: File does not exist [but maybe you moved it]: $file)\n";
 	$COMMANDSET .= "if not exist \"$file\" (call warning \"File does not exist [but maybe you moved it]: '$file'\")\n";
 
 
-	if (($FLAC==0) && ($file =~ /\.flac$/i)) {
+	if (($COPY_FLACS==0) && ($file =~ /\.flac$/i)) {
 		$COMMANDSET .= "echo.\n";
 		$COMMANDSET .= "\%COLOR_WARNING\% \%+ echo NOT copying FLAC file: \"$file\" \%+ \%COLOR_NORMAL\% \n";
 	} else {
@@ -219,7 +233,11 @@ foreach $file (@FILES) {
 		$COMMANDSET .= "        iff not exist \"$newfile\" then \n";
 		$COMMANDSET .= "                echo.\n";
 		$COMMANDSET .= "                echos \%\@ANSI_RANDFG_SOFT[]\%\@RANDCURSOR[]\%\@char[9959] ``\n";
-		$COMMANDSET .= "                $COPY \"$file\" \"$newfile\"\n";
+		if ($COPY_SIDECARS) {
+			$COMMANDSET .= "                $COPY \"$file_without_extension.*\" \"$newfile\"\n";
+		} else {}
+			$COMMANDSET .= "                $COPY \"$file\" \"$newfile\"\n";
+		}
 		$COMMANDSET .= "                delay /m 100\n";									# slight delay to not quote go 100% of the time
 		$COMMANDSET .= "                call status-bar $destinationDriveLetter:\n";
 	    $COMMANDSET .= "        endiff\n";
@@ -238,10 +256,9 @@ foreach $file (@FILES) {
 
 ##### Randomize the copies, so that if we run out of space, we get a random sampling of everything we attempted to copy
 print "\nREM (randomizing array: begin)\n";
-# Randomly sort the array
+use List::Util qw(shuffle);
 #y @QUEUEDCOMMANDSRANDOM = &randarray(@QUEUEDCOMMANDS);		#rem this was horribly inefficient
 my @QUEUEDCOMMANDSRANDOM =  shuffle  (@QUEUEDCOMMANDS);		#2023 ChatGPT suggestion
-
 print "\nREM (randomizing array: end)\n";
 my $total_files=@QUEUEDCOMMANDSRANDOM;
 my $remain=$total_files;
@@ -261,6 +278,11 @@ foreach my $command (@QUEUEDCOMMANDSRANDOM) {
 print "\n\n";
 print "goto :END\n";
 print "\n";
+
+
+
+
+##### Subroutine for if we run out of space:
 print "    :Full\n";
 print "        echo.\n";
 print "        echo.\n";
@@ -281,7 +303,7 @@ print "        call pause-for-x-seconds 60\n";
 print "    return\n";
 print "\n";
 print ":END\n";
-print "call nocar >nul\n";
+print "call nocar >nul\n";					#weird voodoo to deal with files that have a caret (“^”) in them
 
 
 
@@ -300,7 +322,7 @@ print "call nocar >nul\n";
 
 
 ###########################################################################################################################
-sub randarray {
+sub randarray {				# randomizes the order of an array
         my @array = @_;
         my @rand = undef;
         my $seed = $#array + 1;
