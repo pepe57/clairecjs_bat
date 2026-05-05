@@ -142,7 +142,9 @@ foreach $file (@FILES) {
 
 						 
 	$newFolder =  $folder;
-	$newFolder =~ s/[A-Z]?:?[\\\/]testing([\\\/])1 - ONEDIR JUDGE WITH CAROLYN/$destination$1MISC/gi;		#special case, not the best line to copy-paste for other transformations
+	$newFolder =~ s/\\_PROCESSING\\/$destination/ig;									
+	$newFolder =~ s/[A-Z]?:?[\\\/]testing([\\\/])J?1 - ONEDIR JUDGE WITH CAROLYN/$destination$1MISC/gi;		#special case, not the best line to copy-paste for other transformations
+	$newFolder =~ s/[A-Z]?:?[\\\/]testing([\\\/])J?2 - ALREADY-IN-ATTRIB-BUT-NEED-JUDGMENT-WITH-CAROLYN/$destination$1MISC/gi;		#special case, not the best line to copy-paste for other transformations
 	$newFolder =~ s/[A-Z]?:?[\\\/]testing([\\\/])/$destination/gi;
 	$newFolder =~ s/[A-Z]?:?[\\\/]media[\\\/]mp3-processing[\\\/]check4norm[\\\/]changerrecent[\\\/]/$destination/gi;
 	$newFolder =~ s/[A-Z]?:?[\\\/]media[\\\/]mp3-processing[\\\/]CHECK4~1[\\\/]changerrecent[\\\/]/$destination/gi;
@@ -167,6 +169,9 @@ foreach $file (@FILES) {
 	$newFolder =~ s/[A-Z]?:?[\\\/]mp3/$destination/gi;							# 20140819 moved to end
 	$newFolder =~ s/[\\\/][\\\/]/$SLASH/g;										# fix extra slash deposits made by anything above
 	$newFolder =~ s/CAROLYN-PROCESS[^\\\/]*//;
+
+	### Do these after the last	 ones:
+	$newFolder =~ s/\Q$destination$destination\E/$destination/i;				# convert repeating drive letters i.e. “g:\g:\g:\” ➜ “g:\” ... use \Q and \E to prevent filenames from being interpreted as regexes
 	$newFolder =~ s/^(.*)([A-Z]:.*$)/$2/;										# Because we don't branch for each of the above substitutions, sometimes we end up with the target folder prefixing twice
 	$newFolder =~ s/\\mp3music\\/\\mp3\\/ig;									# Because we don't branch for each of the above substitutions, sometimes we end up with the target folder prefixing twice
 	
