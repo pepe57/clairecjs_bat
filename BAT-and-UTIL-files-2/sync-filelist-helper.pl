@@ -10,10 +10,11 @@
 
 ##### CONFIGURATION: BEHAVIOR:
 
-my $COPY_SIDECARS                    = 1;							#set to “1” to copy sidecar files (i.e. subtitles, art, lyrics, any file with same base but diff extension)
-my $PUT_EACH_SONG_IN_RANDOM_FOLDER   = 0;							#set to “1” for each file to be individually copied to a random folder name, which allows a smulated shuffle on the MANY standalone speakers (almost all of them) that don’t have shuffle functionality
-my $COLLAPSE_FILES_TO_ROOT_WHEN_DONE = 0;							#set to “1” to move all files to the root folder when done; useful for players that can only do random in a single folder
-my $COPY_FLACS                       = 1;							#set to “0” to not copy FLAC files, if you are dealing with an older player that doesn’t support them
+my $COPY_SIDECARS                      = 1;							#set to “1” to copy sidecar files (i.e. subtitles, art, lyrics, any file with same base but diff extension)
+my $PUT_EACH_SONG_IN_RANDOM_FOLDER     = 0;							#set to “1” for each file to be individually copied to a random folder name, which allows a smulated shuffle on the MANY standalone speakers (almost all of them) that don’t have shuffle functionality
+my $COLLAPSE_FILES_TO_ROOT_WHEN_DONE   = 0;							#set to “1” to move all files to the root folder when done; useful for players that can only do random in a single folder
+my $COPY_FLACS                         = 1;							#set to “0” to not copy FLAC files, if you are dealing with an older player that doesn’t support them
+my $COPY_IF_TARGET_FILE_EXISTS         = 0;							#set to “1” to run the copy /u command on target files even if they exist. Although this won’t copy if the file is the same, the comparison to determine that takes time, and this can REALLLLLLLLY slow down an update that may only be 1% of the files to take possibly as long as the same amount of time for updating 100% of the files... So we usually keep this set to 0!
 
 ##### CONFIGURATION: INTERNALS:
 
@@ -28,21 +29,30 @@ my $BACKSLASHES                    = 1;								#set to 1 if you want all filenam
 # ✨✨✨✨✨✨✨ ALTERNATE WAYS TO PASS PARAMETERS - BY ENVIRONMENT VARIABLE AND BY TRIGGER FILE ✨✨✨✨✨✨✨
 # ✨✨✨✨✨✨✨ ALTERNATE WAYS TO PASS PARAMETERS - BY ENVIRONMENT VARIABLE AND BY TRIGGER FILE ✨✨✨✨✨✨✨
 
-##### ENVIRONMENT VARIABLE BEHAVIOR OVERRIDES:
-if ("1" == "$ENV{PUT_EACH_SONG_IN_RANDOM_FOLDER}"       ) { $PUT_EACH_SONG_IN_RANDOM_FOLDER = 1; }			
-if ("1" == "$ENV{DO_PUT_EACH_SONG_IN_RANDOM_FOLDER}"    ) { $PUT_EACH_SONG_IN_RANDOM_FOLDER = 1; }			
-if ("1" == "$ENV{DONT_PUT_EACH_SONG_IN_RANDOM_FOLDER}"  ) { $PUT_EACH_SONG_IN_RANDOM_FOLDER = 0; }			
-if ("1" == "$ENV{DO_NOT_PUT_EACH_SONG_IN_RANDOM_FOLDER}") { $PUT_EACH_SONG_IN_RANDOM_FOLDER = 0; }			
-if ("1" == "$ENV{COPY_FLACS}"                           ) { $COPY_FLACS                     = 1; }
-if ("1" == "$ENV{DO_COPY_FLACS}"                        ) { $COPY_FLACS                     = 1; }
-if ("1" == "$ENV{DONT_COPY_FLACS}"                      ) { $COPY_FLACS                     = 0; }
-if ("1" == "$ENV{DO_NOT_COPY_FLACS}"                    ) { $COPY_FLACS                     = 0; }
-if ("1" == "$ENV{COPY_SIDECARS}"                        ) { $COPY_SIDECARS                  = 1; }
-if ("1" == "$ENV{DO_COPY_SIDECARS}"                     ) { $COPY_SIDECARS                  = 1; }
-if ("1" == "$ENV{DONT_COPY_SIDECARS}"                   ) { $COPY_SIDECARS                  = 0; }
-if ("1" == "$ENV{DO_NOT_COPY_SIDECARS}"                 ) { $COPY_SIDECARS                  = 0; }
+##### ENVIRONMENT VARIABLE BEHAVIOR ARGUMENTS, WHICH OVERRIDE COMMAND-LINE ARGUMENTS:
 
-##### GET FILESYSTEM ARGUMENTS:
+if ("1" == "$ENV{PUT_EACH_SONG_IN_RANDOM_FOLDER}"         ) { $PUT_EACH_SONG_IN_RANDOM_FOLDER   = 1; }			
+if ("1" == "$ENV{DO_PUT_EACH_SONG_IN_RANDOM_FOLDER}"      ) { $PUT_EACH_SONG_IN_RANDOM_FOLDER   = 1; }			
+if ("1" == "$ENV{DONT_PUT_EACH_SONG_IN_RANDOM_FOLDER}"    ) { $PUT_EACH_SONG_IN_RANDOM_FOLDER   = 0; }			
+if ("1" == "$ENV{DO_NOT_PUT_EACH_SONG_IN_RANDOM_FOLDER}"  ) { $PUT_EACH_SONG_IN_RANDOM_FOLDER   = 0; }			
+if ("1" == "$ENV{COLLAPSE_FILES_TO_ROOT_WHEN_DONE}"       ) { $COLLAPSE_FILES_TO_ROOT_WHEN_DONE = 1; }
+if ("1" == "$ENV{DO_COLLAPSE_FILES_TO_ROOT_WHEN_DONE}"    ) { $COLLAPSE_FILES_TO_ROOT_WHEN_DONE = 1; }
+if ("1" == "$ENV{DONT_COLLAPSE_FILES_TO_ROOT_WHEN_DONE}"  ) { $COLLAPSE_FILES_TO_ROOT_WHEN_DONE = 0; }
+if ("1" == "$ENV{DO_NOT_COLLAPSE_FILES_TO_ROOT_WHEN_DONE}") { $COLLAPSE_FILES_TO_ROOT_WHEN_DONE = 0; }
+if ("1" == "$ENV{COPY_IF_TARGET_FILE_EXISTS}"             ) { $COPY_IF_TARGET_FILE_EXISTS       = 1; }			
+if ("1" == "$ENV{DO_COPY_IF_TARGET_FILE_EXISTS}"          ) { $COPY_IF_TARGET_FILE_EXISTS       = 1; }			
+if ("1" == "$ENV{DONT_COPY_IF_TARGET_FILE_EXISTS}"        ) { $COPY_IF_TARGET_FILE_EXISTS       = 0; }			
+if ("1" == "$ENV{DO_NOT_COPY_IF_TARGET_FILE_EXISTS}"      ) { $COPY_IF_TARGET_FILE_EXISTS       = 0; }			
+if ("1" == "$ENV{COPY_SIDECARS}"                          ) { $COPY_SIDECARS                    = 1; }
+if ("1" == "$ENV{DO_COPY_SIDECARS}"                       ) { $COPY_SIDECARS                    = 1; }
+if ("1" == "$ENV{DONT_COPY_SIDECARS}"                     ) { $COPY_SIDECARS                    = 0; }
+if ("1" == "$ENV{DO_NOT_COPY_SIDECARS}"                   ) { $COPY_SIDECARS                    = 0; }
+if ("1" == "$ENV{COPY_FLACS}"                             ) { $COPY_FLACS                       = 1; }
+if ("1" == "$ENV{DO_COPY_FLACS}"                          ) { $COPY_FLACS                       = 1; }
+if ("1" == "$ENV{DONT_COPY_FLACS}"                        ) { $COPY_FLACS                       = 0; }
+if ("1" == "$ENV{DO_NOT_COPY_FLACS}"                      ) { $COPY_FLACS                       = 0; }
+
+##### GET FILESYSTEM ARGUMENTS, WHICH OVERRIDE ENVIRONMENT VARIABLE ARGUMENTS:
 if (-e "$destinationDriveLetter:\__ mp3 sync option - collapse __") { $COLLAPSE_FILES_TO_ROOT_WHEN_DONE = 1; }
 if (-e "$destinationDriveLetter:\__ each song in random folder __") { $PUT_EACH_SONG_IN_RANDOM_FOLDER   = 1; }
 
@@ -87,8 +97,8 @@ my %FOLDERS_CREATED=();
 my @QUEUEDCOMMANDS =();
 print "\@Echo OFF\n";
 print "call car.bat\n";		# protection against filenames with caret (“^”) symbol in them 
-print "rem * destinationDrive is \"$destinationDriveLetter\"\n";
-print "\n\echo \%ANSI_COLOR_IMPORTANT\%* Making directories...\%ANSI_COLOR_NORMAL\% \n\n";
+print "rem * destinationDrive is \"$destinationDriveLetter\"\n\n";
+print "echo \%ANSI_COLOR_IMPORTANT\%* Making directories...\%ANSI_COLOR_NORMAL\% \n\n";
 my $file;
 my $file_without_extension;
 my $filenum=0;
@@ -130,13 +140,8 @@ foreach $file (@FILES) {
 		##### WARNING! CLAIREVIRONMENT [sorta kinda] REQUIRES ANY UPDATES TO BELOW TO ALSO BE MADE TO SYNC-MP3-PLAYLISTS-TO-LOCATION-HELPER.PL, which is the original deprecated version of this
 		##### WARNING! CLAIREVIRONMENT [sorta kinda] REQUIRES ANY UPDATES TO BELOW TO ALSO BE MADE TO SYNC-MP3-PLAYLISTS-TO-LOCATION-HELPER.PL, which is the original deprecated version of this
 
-
-
-
+						 
 	$newFolder =  $folder;
-
-	$newFolder =~ s/CAROLYN-PROCESS[^\\\/]*//;
-
 	$newFolder =~ s/[A-Z]?:?[\\\/]testing([\\\/])1 - ONEDIR JUDGE WITH CAROLYN/$destination$1MISC/gi;		#special case, not the best line to copy-paste for other transformations
 	$newFolder =~ s/[A-Z]?:?[\\\/]testing([\\\/])/$destination/gi;
 	$newFolder =~ s/[A-Z]?:?[\\\/]media[\\\/]mp3-processing[\\\/]check4norm[\\\/]changerrecent[\\\/]/$destination/gi;
@@ -159,13 +164,11 @@ foreach $file (@FILES) {
 	$newFolder =~ s/[A-Z]?:?[\\\/]CHECK4~1[\\\/]NEXT.INPROGRESS[\\\/]/$destination/gi;
 	$newFolder =~ s/[A-Z]?:?[\\\/]CHECK4~1[\\\/]NEXT-A~1[\\\/]/$destination/gi;
 	$newFolder =~ s/[A-Z]?:?[\\\/]CHECK4~1[\\\/]/$destination/gi;
-	$newFolder =~ s/[A-Z]?:?[\\\/]mp3/$destination/gi;		#20140819 moved to end
-	$newFolder =~ s/[\\\/][\\\/]/$SLASH/g;					#fix extra slash deposits made by anything above
-
-	##### Because we don't branch for each of the above substitutions, sometimes we end up with the target folder prefixing twice:
-	$newFolder =~ s/^(.*)([A-Z]:.*$)/$2/;		
-	$newFolder =~ s/\\mp3music\\/\\mp3\\/ig;
-
+	$newFolder =~ s/[A-Z]?:?[\\\/]mp3/$destination/gi;							# 20140819 moved to end
+	$newFolder =~ s/[\\\/][\\\/]/$SLASH/g;										# fix extra slash deposits made by anything above
+	$newFolder =~ s/CAROLYN-PROCESS[^\\\/]*//;
+	$newFolder =~ s/^(.*)([A-Z]:.*$)/$2/;										# Because we don't branch for each of the above substitutions, sometimes we end up with the target folder prefixing twice
+	$newFolder =~ s/\\mp3music\\/\\mp3\\/ig;									# Because we don't branch for each of the above substitutions, sometimes we end up with the target folder prefixing twice
 	
 	#### All the above $newFolder might be for nothing, because if we set this optin, this is what’s supposed to happen:
     if ($PUT_EACH_SONG_IN_RANDOM_FOLDER) {
@@ -185,71 +188,50 @@ foreach $file (@FILES) {
 	}
 
 	##### Create target filename:
-	if ($COLLAPSE_FILES_TO_ROOT_WHEN_DONE==0) { $newfile =               "$newFolder$DIVIDER$fileonly"; }
-	if ($COLLAPSE_FILES_TO_ROOT_WHEN_DONE==1) { $newfile = "$destinationDriveLetter:$DIVIDER$fileonly"; }
-	$newfile =~ s/\\\\/\\/g;	#erase consecutive dupe folder dividers
-	$newfile =~ s/\/\//\//g;	#erase consecutive dupe folder dividers
+	if ($COPY_SIDECARS) {
+		if ($COLLAPSE_FILES_TO_ROOT_WHEN_DONE==0) { $newfile =               "$newFolder"; }
+		if ($COLLAPSE_FILES_TO_ROOT_WHEN_DONE==1) { $newfile = "$destinationDriveLetter:$DIVIDER"; }		
+	} else {
+		if ($COLLAPSE_FILES_TO_ROOT_WHEN_DONE==0) { $newfile =               "$newFolder$DIVIDER$fileonly"; }
+		if ($COLLAPSE_FILES_TO_ROOT_WHEN_DONE==1) { $newfile = "$destinationDriveLetter:$DIVIDER$fileonly"; }		
+	}
+	$newfile =~ s/\\\\/\\/g;																				#erase consecutive dupe folder dividers
+	$newfile =~ s/\/\//\//g;																				#erase consecutive dupe folder dividers
 
 	##### INITIALIZE OUR STORED COMMANDS:
 	$COMMANDSET = "\n\n\n\n";
 
 	##### Create destination folder, only if necessary:
-	#if ($FOLDERS_CREATED{$newFolder}=="1") {
-	#	#do nothing; it's already created
-	#} else {
-	#	$COMMANDSET .= "if     isdir \"$newFolder\" echo * Exists: $newFolder  \n";		#UNIX people may need to change this!
-	#	$COMMANDSET .= "if not isdir \"$newFolder\" echo * Making: $newFolder  \n";		#UNIX people may need to change this!
-		$COMMANDSET .= "if not isdir \"$newFolder\"      ($MKDIR \"$newFolder\")\n";		#UNIX people may need to change this!
-	#	$FOLDERS_CREATED{$newFolder}="1";
-	#}
+	$COMMANDSET .= "if not isdir \"$newFolder\"      ($MKDIR \"$newFolder\")\n";							#UNIX people may need to change this!
 
 	##### Copy the file:
-	#$file =~ s/c:[\\\/]media/O:\media/i;							#201107 new hades remap kludge
-	#Make filenames safe for command-line:
-	   $file =~ s/\%/%%/g;
-	$newfile =~ s/\%/%%/g;
+	   $file =~ s/\%/%%/g;																					#if file has percent in it, which it really shouldn’t
+	$newfile =~ s/\%/%%/g;																					#if file has percent in it, which it really shouldn’t
 	$COMMANDSET .= "SET LASTFILE=$file\n";
 	$COMMANDSET .= "if \%\@DISKFREE[$destinationDriveLetter:] lt \%\@FILESIZE[\"$file\"] goto :Full\n";
-
-	if (1) {
-		my $WHATEVER = "WHATEVER!";
-	} else {
-		$COMMANDSET .= "color bright yellow on black\n";
-		$COMMANDSET .= "echo * Free Space: \%\@COMMA[\%\@DISKFREE[$destinationDriveLetter:]]\n";
-		$COMMANDSET .= "color green on black\n";
-	}
-
 	$COMMANDSET .= "if \"\%\@READY[$destinationDriveLetter:]\" == \"0\" gosub :NotReady\n";
-
-
 	$COMMANDSET .= "if not exist \"$file\" (call warning \"File does not exist [but maybe you moved it]: '$file'\")\n";
-
 
 	if (($COPY_FLACS==0) && ($file =~ /\.flac$/i)) {
 		$COMMANDSET .= "echo.\n";
 		$COMMANDSET .= "\%COLOR_WARNING\% \%+ echo NOT copying FLAC file: \"$file\" \%+ \%COLOR_NORMAL\% \n";
 	} else {
-	    $COMMANDSET .= "iff exist \"$file\" then\n";
-		$COMMANDSET .= "        iff not exist \"$newfile\" then \n";
-		$COMMANDSET .= "                echo.\n";
-		$COMMANDSET .= "                echos \%\@ANSI_RANDFG_SOFT[]\%\@RANDCURSOR[]\%\@char[9959] ``\n";
-		if ($COPY_SIDECARS) {
-			$COMMANDSET .= "                $COPY \"$file_without_extension.*\" \"$newfile\"\n";
-		} else {}
-			$COMMANDSET .= "                $COPY \"$file\" \"$newfile\"\n";
-		}
-		$COMMANDSET .= "                delay /m 100\n";									# slight delay to not quote go 100% of the time
-		$COMMANDSET .= "                call status-bar $destinationDriveLetter:\n";
-	    $COMMANDSET .= "        endiff\n";
+	    $COMMANDSET .= "iff exist \"$file\" then\n";										# only copy the file if it exists
+
+
+		if (!$COPY_IF_TARGET_FILE_EXISTS) { $COMMANDSET .= "        iff not exist \"$newfile\" then \n";	}					# only copy if the target does not exist
+
+				$COMMANDSET .= "                echo.\nechos \%\@ANSI_RANDFG_SOFT[]\%\@RANDCURSOR[]\%\@char[9959] ``\n";
+						if ($COPY_SIDECARS) { $COMMANDSET .= "                $COPY \"$file_without_extension.*\" \"$newfile\"\n"; }
+						else                { $COMMANDSET .= "                $COPY \"$file\" "         .        "\"$newfile\"\n"; }
+				$COMMANDSET .= "                delay /m 100\n";									# slight delay to not quote go 100% of the time				
+				$COMMANDSET .= "                call status-bar $destinationDriveLetter:\n";
+
+		if (!$COPY_IF_TARGET_FILE_EXISTS) { $COMMANDSET .= "        endiff\n"; }
+
 	    $COMMANDSET .= "endiff\n";
 	}
-
-
-#	$COMMANDSET .= "if \%ERRORLEVEL\%==2 goto :Full\n";				#this gave false-positives due to out-of-sync filelists. Thus we moved on to using %@DISKFREE (above)
-
-
 	push(@QUEUEDCOMMANDS,$COMMANDSET);
-
 	#DEBUG: print "file=$file\nfolderOLD=$folder\nfolderNEW=$newFolder\nfileonly=$fileonly\nnewfile=$newfile\n\n";
 }
 
@@ -257,8 +239,7 @@ foreach $file (@FILES) {
 ##### Randomize the copies, so that if we run out of space, we get a random sampling of everything we attempted to copy
 print "\nREM (randomizing array: begin)\n";
 use List::Util qw(shuffle);
-#y @QUEUEDCOMMANDSRANDOM = &randarray(@QUEUEDCOMMANDS);		#rem this was horribly inefficient
-my @QUEUEDCOMMANDSRANDOM =  shuffle  (@QUEUEDCOMMANDS);		#2023 ChatGPT suggestion
+my @QUEUEDCOMMANDSRANDOM = shuffle(@QUEUEDCOMMANDS);			
 print "\nREM (randomizing array: end)\n";
 my $total_files=@QUEUEDCOMMANDSRANDOM;
 my $remain=$total_files;
@@ -276,8 +257,7 @@ foreach my $command (@QUEUEDCOMMANDSRANDOM) {
 
 
 print "\n\n";
-print "goto :END\n";
-print "\n";
+print "goto :END\n\n";
 
 
 
@@ -310,33 +290,3 @@ print "call nocar >nul\n";					#weird voodoo to deal with files that have a care
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-###########################################################################################################################
-sub randarray {				# randomizes the order of an array
-        my @array = @_;
-        my @rand = undef;
-        my $seed = $#array + 1;
-        my $randnum = int(rand($seed));
-        $rand[$randnum] = shift(@array);
-		my $i=0;
-        while (1) {
-                my $randnum = int(rand($seed));
-                if ($rand[$randnum] eq undef) {
-                        $rand[$randnum] = shift(@array);
-                }
-				if (($i++ % 100) == 1) { print "REM (thinking) (i=$i)"; }
-                last if ($#array == -1);
-        }
-        return @rand;
-}
-###########################################################################################################################
