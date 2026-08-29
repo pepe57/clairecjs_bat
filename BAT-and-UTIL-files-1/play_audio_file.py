@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# CHAT ARTIFACT BUILD: 2026-08-21-V299-V266-TRUNK-KARAOKE-RECLAIM-AND-SHUFFLE-CONTINUITY
+# CHAT ARTIFACT BUILD: 2026-08-28-V325-VOLUME-FEEDBACK-BOX-FIX
 """Interactively preview an audio file from a Windows console.
 
 This program uses FFplay and accepts any audio format FFmpeg can decode,
@@ -71,6 +71,185 @@ import wave
 import webbrowser
 import zlib
 from unittest import mock
+
+# V310 first-party dependency bootstrap.  The release ZIP bundles these files;
+# automatic GitHub recovery exists for single-file/partial third-party installs.
+CLAIRECJS_UTILS_GITHUB_RAW_ROOT = (
+    "https://raw.githubusercontent.com/ClaireCJS/clairecjs_bat/main/"
+    "BAT-and-UTIL-files-1/clairecjs_utils"
+)
+CLAIRECJS_DEPENDENCIES: dict[str, dict[str, object]] = {
+    "claire_audio_processing": {
+        "filename": "claire_audio_processing.py",
+        "minimum_api": 2,
+        "release_sha256": "53e639eb84b71aac97bd2d7f066b114f49b3e286b4cda2e404fb747b99f7fff0",
+    },
+}
+_CLAIRECJS_IMPORTED_MODULES: dict[str, object] = {}
+
+
+def clairecjs_dependency_search_dirs() -> tuple[Path, ...]:
+    """Return supported same-folder/subfolder/system Claire utility locations."""
+    script_dir = Path(__file__).resolve().parent
+    candidates = [
+        script_dir,
+        script_dir / "clairecjs_utils",
+        script_dir / "clairecjs_util",  # compatibility spelling used by older tools
+        Path.cwd(),
+        Path.cwd() / "clairecjs_utils",
+        Path.cwd() / "clairecjs_util",
+    ]
+    if os.name == "nt":
+        candidates.extend([
+            Path(r"C:\BAT\clairecjs_utils"),
+            Path(r"C:\BAT\clairecjs_util"),
+            Path(r"C:\clairecjs_utils"),
+        ])
+    seen: set[str] = set()
+    unique: list[Path] = []
+    for candidate in candidates:
+        key = str(candidate).casefold()
+        if key not in seen:
+            seen.add(key)
+            unique.append(candidate)
+    return tuple(unique)
+
+
+def _load_clairecjs_module_from_path(module_name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not create import spec for {path}")
+    module = importlib.util.module_from_spec(spec)
+    previous = sys.modules.get(module_name)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        if previous is None:
+            sys.modules.pop(module_name, None)
+        else:
+            sys.modules[module_name] = previous
+        raise
+    return module
+
+
+def _clairecjs_dependency_api_ok(module_name: str, module: object) -> bool:
+    requirement = CLAIRECJS_DEPENDENCIES[module_name]
+    minimum = int(requirement.get("minimum_api", 0) or 0)
+    if module_name == "claire_audio_processing":
+        # The helper's published contract uses *_VERSION (for example V120),
+        # while an early PAFPlayer bootstrap incorrectly looked only for the
+        # nonexistent *_API_VERSION alias. Accept both spellings and parse the
+        # leading V so installed V120 helpers are not misreported as version 0.
+        raw_version = getattr(module, "CLAIRE_AUDIO_PROCESSING_API_VERSION", None)
+        if raw_version is None:
+            raw_version = getattr(module, "CLAIRE_AUDIO_PROCESSING_VERSION", 0)
+        match = re.search(r"\d+", str(raw_version or ""))
+        found = int(match.group(0)) if match else 0
+        return found >= minimum
+    return True
+
+
+def find_clairecjs_dependency(module_name: str):
+    """Find and validate one first-party helper without importing package __init__."""
+    if module_name in _CLAIRECJS_IMPORTED_MODULES:
+        return _CLAIRECJS_IMPORTED_MODULES[module_name]
+    requirement = CLAIRECJS_DEPENDENCIES[module_name]
+    filename = str(requirement["filename"])
+    for directory in clairecjs_dependency_search_dirs():
+        candidate = directory / filename
+        if not candidate.is_file():
+            continue
+        try:
+            module = _load_clairecjs_module_from_path(module_name, candidate)
+            if _clairecjs_dependency_api_ok(module_name, module):
+                _CLAIRECJS_IMPORTED_MODULES[module_name] = module
+                return module
+        except Exception:
+            continue
+    return None
+
+
+def _prompt_clairecjs_download_location(filename: str) -> Path | None:
+    """Ask whether a missing helper should live beside PAFPlayer or in a subfolder."""
+    if not getattr(sys.stdin, "isatty", lambda: False)():
+        return None
+    script_dir = Path(__file__).resolve().parent
+    print(
+        f"\n🧩 Required ClaireCJS helper is missing/outdated: {filename}\n"
+        "PAFPlayer can download the official copy from ClaireCJS's GitHub."
+    )
+    while True:
+        try:
+            choice = input(
+                "Download to [U] clairecjs_utils\\ subfolder (recommended), "
+                "[S] same folder as PAFPlayer, or [N] don't download? [U] "
+            ).strip().casefold()
+        except (EOFError, KeyboardInterrupt):
+            return None
+        if choice in {"", "u", "utils", "subfolder", "1"}:
+            return script_dir / "clairecjs_utils"
+        if choice in {"s", "same", "2"}:
+            return script_dir
+        if choice in {"n", "no", "3", "q", "quit"}:
+            return None
+
+
+def ensure_clairecjs_dependency(module_name: str, *, interactive: bool = True):
+    """Locate or optionally recover one ClaireCJS helper from the official GitHub."""
+    module = find_clairecjs_dependency(module_name)
+    if module is not None:
+        return module
+    requirement = CLAIRECJS_DEPENDENCIES[module_name]
+    filename = str(requirement["filename"])
+    if not interactive:
+        return None
+    destination_dir = _prompt_clairecjs_download_location(filename)
+    if destination_dir is None:
+        return None
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    destination = destination_dir / filename
+    url = f"{CLAIRECJS_UTILS_GITHUB_RAW_ROOT}/{filename}"
+    temporary = destination.with_name(destination.name + ".download")
+    try:
+        from urllib.request import Request, urlopen
+        request = Request(url, headers={"User-Agent": "PAFPlayer-v319-dependency-bootstrap"})
+        print(f"⬇ Downloading {filename} from ClaireCJS GitHub…")
+        with urlopen(request, timeout=30) as response:
+            payload = response.read(2 * 1024 * 1024 + 1)
+        if not payload or len(payload) > 2 * 1024 * 1024:
+            raise RuntimeError("download was empty or exceeded the 2 MiB helper limit")
+        text = payload.decode("utf-8")
+        compile(text, str(destination), "exec")
+        actual_sha = hashlib.sha256(payload).hexdigest()
+        expected_sha = str(requirement.get("release_sha256", "") or "")
+        if expected_sha and actual_sha != expected_sha:
+            print(
+                "⚠ GitHub helper differs from the copy bundled with this PAFPlayer release; "
+                "API compatibility will be verified before use."
+            )
+        temporary.write_bytes(payload)
+        downloaded = _load_clairecjs_module_from_path(module_name, temporary)
+        if not _clairecjs_dependency_api_ok(module_name, downloaded):
+            raise RuntimeError("downloaded helper API is too old for this PAFPlayer release")
+        os.replace(temporary, destination)
+        module = _load_clairecjs_module_from_path(module_name, destination)
+        if not _clairecjs_dependency_api_ok(module_name, module):
+            raise RuntimeError("installed helper failed API verification")
+        _CLAIRECJS_IMPORTED_MODULES[module_name] = module
+        print(f"✓ Installed {filename} → {destination}")
+        return module
+    except Exception as exc:
+        with contextlib.suppress(OSError):
+            temporary.unlink()
+        print(
+            f"⚠ Could not install {filename}: {exc}\n"
+            f"  You can manually place it beside play_audio_file.py or in "
+            f"clairecjs_utils\\. Source: {url}",
+            file=sys.stderr,
+        )
+        return None
+
 
 _TK_SECONDARY_THREAD_USED = False
 
@@ -347,10 +526,10 @@ except ImportError:  # pragma: no cover
 import csv
 from datetime import datetime, timezone, timedelta
 # Set to 0 when the terminal cannot render DEC SIXEL graphics.
-PLAYER_BUILD_ID                 = "2026-08-21-v303-history-repair-karaoke-offset-emoji-spacing"
+PLAYER_BUILD_ID                 = "2026-08-29-v361-eighteen-two-circled-digits"
 PROGRAM_TITLE                   = "PAFplayer"
-PROGRAM_VERSION                 = "V303"
-PROGRAM_RELEASE_LABEL           = "V303"
+PROGRAM_VERSION                 = "V361"
+PROGRAM_RELEASE_LABEL           = "V361"
 WRITE_NOWPLAYING_THIS_OFTEN     = 5.0
 PREVENT_WINAMP_PAUSE_WHEN_WE_ARE_PAUSED = 0
 LYRIC_FADE_SECONDS              = 6.0
@@ -374,8 +553,9 @@ SHUFFLE_RAINBOW_THROB_SECONDS   = (3.5 / 1.10) / (3.0 * 1.33)  # V86: preserve t
 SHUFFLE_RAINBOW_CYCLE_SECONDS   = SONG_RAINBOW_CYCLE_SECONDS / 2.0
 SHUFFLE_EXPIRATION_IN_HOURS      = 5.0  # Reuse a completed internally shuffled playlist until this many hours have elapsed, unless the playlist file itself changes first.
 PLAYLIST_SOURCE_POLL_SECONDS       = 5.0  # V295 salvage: notice edits to the active file-backed playlist without blocking playback.
-PLAYLIST_SHUFFLE_ALGORITHM_ID      = "history-deciles-safe-identity-v285"  # Cache contract for the salvaged v282/v285 history shuffle.
-SHUFFLE_RECENT_AVOID_SECONDS      = 3.0 * 60.0 * 60.0  # While shuffle is active, reject a proposed track earned-played or merely launched/visited within the last 3 hours when any distinct non-recent candidate can be found.
+PLAYLIST_SHUFFLE_ALGORITHM_ID      = "fixed-slot-history-lazy-metadata-cache-v314"  # V314: one batched history pass, filename-first inference, and persistent size/mtime-validated metadata for the genuinely ambiguous remainder.
+SHUFFLE_RECENT_AVOID_ENABLED      = False  # V307: legacy 3-hour anti-repeat override. Disabled by default and no longer part of normal shuffle behavior. Set True here to restore it experimentally.
+SHUFFLE_RECENT_AVOID_SECONDS      = 3.0 * 60.0 * 60.0  # Used only when SHUFFLE_RECENT_AVOID_ENABLED is True.
 PLAYLIST_RESUME_NEAR_EOF_RESET_SECONDS = 5.0  # A saved bookmark effectively at EOF restarts the same song from 0 instead of launching FFplay for a few milliseconds and falling out of the player.
 SHUFFLE_CACHE_ASYNC_WRITE_DELAY_SECONDS = 0.75  # Queue/cache writes happen on a daemon thread after this brief grace period, so the next FFplay/artwork/UI startup gets first dibs on CPU/disk; rapid skips coalesce to the newest queue snapshot.
 PLAYLIST_EAGER_EXISTENCE_CHECK_LIMIT = 5000  # Above this size, trust playlist path syntax during bulk parsing and defer disk existence checks until a track is selected; avoids tens of thousands of random metadata reads on HDDs.
@@ -389,7 +569,7 @@ REPLAYGAIN_DEFAULT_MODE         = "track"  # "track" prefers REPLAYGAIN_TRACK_GA
 WEB_SERVER_ENABLED              = True   # Integrated local status/control page is on by default.
 WEB_SERVER_HOST                 = "127.0.0.1"  # Loopback-only unless explicitly overridden.
 WEB_SERVER_PORT                 = 666    # Historical/requested PAFPlayer local control port.
-WEB_STATUS_POLL_MILLISECONDS    = 1000    # V264: full browser metadata/control state is only 2 Hz; transport actions remain immediate POSTs.
+WEB_STATUS_POLL_MILLISECONDS    = 200    # V337: keep web karaoke within one fifth-second of the shared playback clock.
 WEB_SPECTRUM_POLL_MILLISECONDS  = 100    # V265: raw analyzer bytes arrive at 10 Hz; all resampling/mode shaping/AGC happens in the browser worker, not PAFPlayer.
 WEB_SPECTRUM_BINS               = 48     # Browser analyzer stays intentionally coarser than the console renderer so it cannot compete for console throughput.
 WEB_CLIENT_ACTIVE_SECONDS       = 2.5    # Stop browser-only spectrum preparation shortly after the last page/API request disappears.
@@ -874,6 +1054,8 @@ KARAOKE_VISUALIZER_OVERLAY_TOGGLE = "karaoke-visualizer-overlay-toggle"
 ALBUM_ART_VISUALIZER_TOGGLE     = "album-art-visualizer-toggle"
 LAYERED_ART_VISUALIZER_TOGGLE   = "layered-art-visualizer-toggle"
 EXTERNAL_ALBUM_ART_TOGGLE       = "external-album-art-toggle"
+ARTWORK_KARAOKE_CONFIG          = "artwork-karaoke-config"
+ARTWORK_KARAOKE_TOGGLE          = "artwork-karaoke-toggle"
 KARAOKE_VISUALIZER_EXPAND_TOGGLE = "karaoke-visualizer-expand-toggle"
 KARAOKE_VISUALIZER_HEIGHT_CYCLE = "karaoke-visualizer-height-cycle"
 FREQUENCY_WARP_TOGGLE            = "frequency-warp-toggle"
@@ -924,9 +1106,11 @@ DEFAULT_MENU                    = "default-menu"
 REDRAW_UI                       = "redraw-ui"
 REDRAW_UI_CLEAR_ART             = "redraw-ui-clear-art"
 FLOATING_LYRICS_TOGGLE          = "floating-lyrics-toggle"
+FLOATING_KARAOKE_CONFIG         = "floating-karaoke-config"
 LASTFM_SCROBBLE_NOW             = "lastfm-scrobble-now"
 WEB_VIEW_LASTFM_PROFILE          = "web-view-lastfm-profile"
 MARK_SONG_LEARNED                = "mark-song-learned"
+TOGGLE_LEARNED_STATE               = "toggle-learned-state"  # V310 Alt+L: fast learned:Y/N toggle
 OPEN_PRIMARY_URL                = "open-primary-url"
 BROWSE_URLS                     = "browse-urls"
 EXTERNAL_ALBUM_ART_FOREGROUND   = "external-album-art-foreground"
@@ -1031,7 +1215,7 @@ SPECTRUM_BACKGROUND_START_DELAY_SECONDS = 0.35 # Enough time for FFplay to own a
 DEFAULT_VISUALIZER_FADE_SECONDS = 0.08
 DEFAULT_PERSISTENCE_MODE        = 12  # Waterfall Smear.
 DEFAULT_VISUALIZER_GRANULARITY  = 3  # 1=one bin/cell, 2=two Unicode half-cell bins/cell, 3=two-bin custom DRCS twin-bar glyphs (default).
-DEFAULT_FREQUENCY_WARP_ENABLED   = 0  # Ctrl+Alt+F9 experimental frequency-axis curve: left 55% unchanged, upper ~30% compressed into the final ~15%.
+DEFAULT_FREQUENCY_WARP_ENABLED   = 0  # Ctrl+Alt+F9 experimental frequency-axis curve: low frequencies are smoothly compacted, while the upper range remains compressed.
 VISUALIZER_DISABLE_AUTOWRAP_DURING_PAINT = 1  # Full-width block rows can leave VT terminals in a wrap-pending state; disable DECAWM while painting and force every row back to absolute column 1.
 VISUALIZER_FORCE_ROW_COLUMN_ONE = 1  # Emit CSI 1G at every spectrum row boundary so no DRCS/half-cell/font-state transition can make a later row inherit a shifted horizontal cursor position.
 # V296: Ctrl+Z runtime-setting undo history. This stores only lightweight
@@ -1075,6 +1259,7 @@ EXTERNAL_ALBUM_ART_POPUP_COLOR_EMOJI_VALUE = "ExternalAlbumArtPopupColorEmojiV29
 EXTERNAL_ALBUM_ART_MANUAL_SIZE_VALUE = "ExternalAlbumArtManualSize"
 EXTERNAL_ALBUM_ART_LYRICS_MODE_VALUE = "ExternalAlbumArtLyricsMode"  # Legacy V179-and-earlier 0=off/1=art/2=float key; read only for migration.
 EXTERNAL_ALBUM_ART_LYRICS_MODE_V180_VALUE = "ExternalAlbumArtLyricsModeV180"  # V180 three-way: 0=artwork, 1=floating, 2=both.
+EXTERNAL_ALBUM_ART_KARAOKE_ENABLED_VALUE = "ExternalAlbumArtKaraokeEnabledV336"
 EXTERNAL_ALBUM_ART_LYRIC_FONT_SCALE_VALUE = "ExternalAlbumArtLyricFontScalePercent"
 EXTERNAL_ALBUM_ART_KARAOKE_COLOR_MODE_VALUE = "ExternalAlbumArtKaraokeColorMode"
 EXTERNAL_ALBUM_ART_KARAOKE_COLOR_FAVORITES_VALUE = "ExternalAlbumArtKaraokeColorFavorites"
@@ -1186,6 +1371,7 @@ _ALBUM_ART_BYTES_CACHE: dict[tuple[str, int, int], bytes | None] = {}
 _ALBUM_ART_SOURCE_CACHE: dict[tuple[str, int, int], str] = {}  # V93: distinguish embedded/local/VLC-cache sources so external cached art is never written into the music folder.
 _ASYNC_KEY_LATCH: set[int] = set()
 _ASYNC_EXTENDED_SUPPRESS_ONCE: dict[str, float] = {}
+_ASYNC_HELD_ACTION_REPEAT_AT: dict[int, float] = {}
 _ASYNC_CHAR_SUPPRESS_ONCE: dict[str, float] = {}
 _ASYNC_HOLD_STARTED: dict[str, float] = {}
 _ASYNC_HOLD_STAGE: dict[str, int] = {}
@@ -1212,6 +1398,17 @@ ART_COLOR_VISUALIZER_REPRESENTATIONS = ("none", "bars", "blackness", "both")
 ART_COLOR_VISUALIZER_REPRESENTATION = "none"
 ART_COLOR_VISUALIZER_BAR_STRENGTH = 0.70
 ART_COLOR_VISUALIZER_BLACK_STRENGTH = 0.25
+# V305 EXP: how cover-art detail is carried inside *filled bars*.  The blackness
+# artwork path is intentionally unchanged.  Luma detail is the recommended
+# default because it preserves the live bar's peak brightness while encoding
+# the cover's light/dark structure as saturation/highlight detail.  Hybrid adds
+# a smaller amount of the cover's actual chroma on top of that structure.
+ART_COLOR_VISUALIZER_BAR_BLEND_MODES = (
+    "Color mix (legacy)",
+    "Luma detail (recommended)",
+    "Hybrid (luma + color)",
+)
+ART_COLOR_VISUALIZER_BAR_BLEND_MODE = 1  # 0=legacy color mix, 1=luma detail, 2=hybrid
 # V251: web autoslides configure a local runtime oscillator once; the console
 # visualizer samples it directly on each already-scheduled paint.  The browser
 # no longer sends dozens of strength updates per second, and long cycles remain
@@ -2046,7 +2243,6 @@ semantic = {'address': '📍',
          'ship': '🚢',
          'shirt': '👕',
          'shock': '😲',
-         'shocked': '😲',
          'shoe': '👟',
          'shoes': '👟👟',
          'shop': '🛍️',
@@ -2518,7 +2714,6 @@ EMOJIMAX_CANDIDATE_SYNC_V252 = {
     'ankles': '🫀',
     'annihilate': '🌀',
     'annihilated': '🌀',
-    'anniversary': '🕰️',
     'annoy': '🫶',
     'annoyed': '🫶',
     'annoying': '🫠',
@@ -4747,7 +4942,7 @@ EMOJIMAX_CANDIDATE_SYNC_V252 = {
     'efforts': '🧗',
     'eggers': '🥚',
     'egos': '🫶',
-    'eighteen': '🔞',
+    'eighteen': '①⑧',
     'eighth': '♪',
     'eighties': '🕰️',
     'eighty': '🔢',
@@ -8955,7 +9150,6 @@ EMOJIMAX_CANDIDATE_SYNC_V252 = {
     'seeker': '🧭',
     'seeking': '🧭',
     'seeks': '🧭',
-    'seem': '🧐',
     'seeming': '🧐',
     'sees': '👓',
     'seize': '🤌',
@@ -10388,7 +10582,6 @@ EMOJIMAX_CANDIDATE_SYNC_V252 = {
     'tyranny': '🪢',
     'uda': '🪢',
     'ufos': '🛸🛸🛸',
-    'ugly': '🫣',
     'umbrellas': '☔️',
     'un': '🔤',
     'unable': '🪫',
@@ -10955,7 +11148,7 @@ EMOJIMAX_EXPLICITLY_REMOVED = frozenset({
     "take", "fan", "because", "alone", "come", "comes", "winding",
     "carnivore", "em", "rex", "always", "clean", "strap", "guide", "operator", "operators",
     "escape", "outta", "thrown", "away", "carry", "life", "begin",
-    "padre", "parents", "sire",
+    "padre", "parents", "sire", "floor",
 })
 for _candidate_word, _candidate_emoji in EMOJIMAX_CANDIDATE_SYNC_V252.items():
     if _candidate_word not in EMOJIMAX_EXPLICITLY_REMOVED:
@@ -10963,6 +11156,17 @@ for _candidate_word, _candidate_emoji in EMOJIMAX_CANDIDATE_SYNC_V252.items():
 # Curated removals are authoritative even when a key existed before the candidate sync.
 for _explicitly_removed_word in EMOJIMAX_EXPLICITLY_REMOVED:
     semantic.pop(_explicitly_removed_word, None)
+# V305: 🔤 is the literal ABC button, not a generic placeholder.  The imported
+# candidate table had assigned it to more than a hundred unrelated filler words
+# (prepositions, contractions, foreign particles, etc.).  Remove every inherited
+# use and reserve it exclusively for the literal lyric token "ABC".
+for _abc_placeholder_word, _abc_placeholder_emoji in tuple(semantic.items()):
+    if _abc_placeholder_emoji == "🔤":
+        semantic.pop(_abc_placeholder_word, None)
+semantic["abc"] = "🔤"
+semantic["mom"] = "👩"
+semantic["mommy"] = "👩"
+
 # Post-v266 curated presentation choices salvaged into the v266 trunk.
 semantic["night"] = "🌃"
 semantic["nights"] = "🌃s"
@@ -10975,6 +11179,308 @@ semantic["on"] = "🔛"
 semantic["hot"] = "♨"
 semantic["hot dog"] = "🌭"
 
+# V309 conservative Emojimaxx curation: these ordinary/polysemous/associative words are clearer as text.
+for _v309_killed_emojimax_key in ('whistles', 'buy', 'money', 'texts', 'snoring', 'boring', 'glass', 'hang', 'tight', 'underworld', 'racing', 'granted', 'warm', 'bleeding', 'remains', 'blame', 'burn', 'sanity', 'insanity', 'fast', 'brake', 'grim', 'lived', 'live', 'empty', 'beneath', 'sorry', 'guava', 'hazy', 'held', 'charge', 'kicking', 'frost', 'censor', 'censored', 'calm', 'fervor', 'khan', 'juices', 'hates', 'shut', 'brews', 'perceive', 'rough', 'aint', "ain't", 'ain’t', 'lose', 'chosen', 'drinking', 'terrorize', 'pissing', 'headed', 'fingertips', 'prepare', 'leads', 'sit', 'bar', 'cap', 'cover', 'department', 'fall', 'field', 'full', 'ground', 'high', 'know', 'lost', 'open', 'race', 'record', 'rise', 'root', 'score', 'straight', 'sweet', 'track', 'way', 'work', 'level', 'line', 'section', 'station', 'store', 'park'):
+    semantic.pop(_v309_killed_emojimax_key, None)
+semantic["rich"] = "💰🤑💰"
+semantic["note"] = "🎵"
+semantic["notes"] = "🎵"
+semantic["cross"] = "✝"
+
+# V310: remove additional non-noun commerce/action mappings and other explicit rejects.
+for _v310_killed_emojimax_key in (
+    "called", "views", "sell", "buying", "sold", "selling", "paid",
+    "paying", "spend", "spending", "costing", "trading",
+):
+    semantic.pop(_v310_killed_emojimax_key, None)
+
+# V312: the broad candidate import was much too eager to replace ordinary verbs
+# with associative pictograms.  Keep the original value beside a stable undo
+# code so Claire can restore any individual choice later without reconstructing
+# the old table.  These 121 removals intentionally target verbs/verb forms; the
+# clearer noun and literal-object substitutions remain available.
+EMOJIMAX_V312_REMOVALS_BY_UNDO_CODE: dict[str, tuple[str, str]] = {
+    "EMX312-001": ("abandon", "🗅"),
+    "EMX312-002": ("abandoned", "🗅"),
+    "EMX312-003": ("abandoning", "🗅"),
+    "EMX312-004": ("absorb", "🤌"),
+    "EMX312-005": ("absorbed", "🤌"),
+    "EMX312-006": ("absorbing", "🤌"),
+    "EMX312-007": ("accept", "🫱‍🫲"),
+    "EMX312-008": ("accepted", "🫱‍🫲"),
+    "EMX312-009": ("accepting", "🫱‍🫲"),
+    "EMX312-010": ("accepts", "🫱‍🫲"),
+    "EMX312-011": ("adjust", "🌀"),
+    "EMX312-012": ("adjusted", "🌀"),
+    "EMX312-013": ("adjusting", "🌀"),
+    "EMX312-014": ("affect", "🌀"),
+    "EMX312-015": ("affected", "🌀"),
+    "EMX312-016": ("affecting", "🌀"),
+    "EMX312-017": ("allow", "🫱"),
+    "EMX312-018": ("allowed", "🫱"),
+    "EMX312-019": ("allowing", "🫱"),
+    "EMX312-020": ("alter", "🌀"),
+    "EMX312-021": ("behave", "🧸"),
+    "EMX312-022": ("behaved", "🧸"),
+    "EMX312-023": ("behaving", "🧸"),
+    "EMX312-024": ("belong", "🫴"),
+    "EMX312-025": ("belonged", "🫴"),
+    "EMX312-026": ("belonging", "🫴"),
+    "EMX312-027": ("blocked", "🚏"),
+    "EMX312-028": ("blocking", "🚏"),
+    "EMX312-029": ("borrow", "🫴"),
+    "EMX312-030": ("borrowed", "🫴"),
+    "EMX312-031": ("bother", "🫱"),
+    "EMX312-032": ("bothered", "🫱"),
+    "EMX312-033": ("bothering", "🫱"),
+    "EMX312-034": ("bringing", "🫴"),
+    "EMX312-035": ("brush", "🖌️"),
+    "EMX312-036": ("brushed", "🤌"),
+    "EMX312-037": ("brushing", "🤌"),
+    "EMX312-038": ("bundle", "💩"),
+    "EMX312-039": ("bundled", "🤌"),
+    "EMX312-040": ("bury", "🦻"),
+    "EMX312-041": ("buried", "🦻"),
+    "EMX312-042": ("burying", "🦻"),
+    "EMX312-043": ("carried", "🤌"),
+    "EMX312-044": ("carrying", "🤌"),
+    "EMX312-045": ("carve", "🤌"),
+    "EMX312-046": ("carved", "🤌"),
+    "EMX312-047": ("carving", "🤌"),
+    "EMX312-048": ("caused", "🧬"),
+    "EMX312-049": ("causing", "🧬"),
+    "EMX312-050": ("changed", "🔃"),
+    "EMX312-051": ("damaged", "🩹"),
+    "EMX312-052": ("decide", "🧭"),
+    "EMX312-053": ("decided", "🧭"),
+    "EMX312-054": ("deciding", "🧭"),
+    "EMX312-055": ("declare", "🦢"),
+    "EMX312-056": ("declared", "🦢"),
+    "EMX312-057": ("declaring", "🦢"),
+    "EMX312-058": ("decorate", "🪡"),
+    "EMX312-059": ("decorated", "🪡"),
+    "EMX312-060": ("demonstrate", "🦻"),
+    "EMX312-061": ("demonstrated", "🦻"),
+    "EMX312-062": ("demonstrating", "🦻"),
+    "EMX312-063": ("designed", "🪡"),
+    "EMX312-064": ("designing", "🪡"),
+    "EMX312-065": ("destroy", "🪡"),
+    "EMX312-066": ("destroyed", "🪡"),
+    "EMX312-067": ("destroying", "🪡"),
+    "EMX312-068": ("develop", "🪡"),
+    "EMX312-069": ("developed", "🪡"),
+    "EMX312-070": ("developing", "🪡"),
+    "EMX312-071": ("direct", "➡️"),
+    "EMX312-072": ("directed", "➡️"),
+    "EMX312-073": ("directing", "➡️"),
+    "EMX312-074": ("discover", "🧭"),
+    "EMX312-075": ("discovered", "🧭"),
+    "EMX312-076": ("discovering", "🧭"),
+    "EMX312-077": ("displayed", "🦻"),
+    "EMX312-078": ("displaying", "🦻"),
+    "EMX312-079": ("dispose", "🫴"),
+    "EMX312-080": ("disposed", "🫴"),
+    "EMX312-081": ("formed", "◇"),
+    "EMX312-082": ("forming", "◇"),
+    "EMX312-083": ("gather", "🤌"),
+    "EMX312-084": ("gathered", "🤌"),
+    "EMX312-085": ("grab", "🫳"),
+    "EMX312-086": ("grabbed", "🫳"),
+    "EMX312-087": ("grabbing", "🫳"),
+    "EMX312-088": ("handle", "🍵"),
+    "EMX312-089": ("handled", "🍵"),
+    "EMX312-090": ("hide", "🦻"),
+    "EMX312-091": ("hidden", "🔐"),
+    "EMX312-092": ("hiding", "🦻"),
+    "EMX312-093": ("holding", "🗃️"),
+    "EMX312-094": ("join", "🔗"),
+    "EMX312-095": ("joined", "🔗"),
+    "EMX312-096": ("manage", "🍵"),
+    "EMX312-097": ("managed", "🍵"),
+    "EMX312-098": ("managing", "🍵"),
+    "EMX312-099": ("noticed", "🫵"),
+    "EMX312-100": ("noticing", "🫵"),
+    "EMX312-101": ("organize", "🫱"),
+    "EMX312-102": ("organized", "🫱"),
+    "EMX312-103": ("organizing", "🫱"),
+    "EMX312-104": ("pull", "🫳"),
+    "EMX312-105": ("pulled", "🫳"),
+    "EMX312-106": ("pulling", "🫳"),
+    "EMX312-107": ("pushing", "🫷"),
+    "EMX312-108": ("reach", "🎯"),
+    "EMX312-109": ("reached", "🎯"),
+    "EMX312-110": ("reaching", "🎯"),
+    "EMX312-111": ("save", "💾"),
+    "EMX312-112": ("saved", "💾"),
+    "EMX312-113": ("saving", "💾"),
+    "EMX312-114": ("send", "📤"),
+    "EMX312-115": ("sending", "📤"),
+    "EMX312-116": ("showed", "👓"),
+    "EMX312-117": ("showing", "👓"),
+    "EMX312-118": ("supported", "🫱"),
+    "EMX312-119": ("supporting", "🫱"),
+    "EMX312-120": ("turning", "🔃"),
+    "EMX312-121": ("sent", "🏣"),
+}
+for _v312_undo_code, (_v312_removed_word, _v312_original_glyph) in EMOJIMAX_V312_REMOVALS_BY_UNDO_CODE.items():
+    semantic.pop(_v312_removed_word, None)
+
+# V317: three more corpus/import choices that do not communicate their lyric
+# tokens clearly.  Keep stable undo codes and the exact old glyphs alongside
+# the removals, matching the V312 curation convention.
+EMOJIMAX_V317_REMOVALS_BY_UNDO_CODE: dict[str, tuple[str, str]] = {
+    "EMX317-001": ("off", "📴"),
+    "EMX317-002": ("blaming", "⛏"),
+    "EMX317-003": ("riding", "🏎️"),
+}
+for _v317_undo_code, (_v317_removed_word, _v317_original_glyph) in EMOJIMAX_V317_REMOVALS_BY_UNDO_CODE.items():
+    semantic.pop(_v317_removed_word, None)
+
+# V319: Claire explicitly restored the literal powered-off pictogram.  Keep the
+# V317 removal ledger intact as history while making this newer choice win.
+EMOJIMAX_V319_RESTORATIONS_BY_UNDO_CODE: dict[str, tuple[str, str]] = {
+    "EMX319-001": ("off", "📴"),
+}
+for _v319_undo_code, (_v319_restored_word, _v319_restored_glyph) in EMOJIMAX_V319_RESTORATIONS_BY_UNDO_CODE.items():
+    semantic[_v319_restored_word] = _v319_restored_glyph
+
+# V319 follow-up scan: remove pictograms whose relationship to the written word
+# is misleading or effectively random. Stable undo codes keep every decision
+# reversible without restoring the broad low-quality import wholesale.
+EMOJIMAX_V319_REMOVALS_BY_UNDO_CODE: dict[str, tuple[str, str]] = {
+    "EMX319-002": ("abated", "🌀"),
+    "EMX319-003": ("abducted", "🤌"),
+    "EMX319-004": ("abide", "🧸"),
+    "EMX319-005": ("abolish", "🫱"),
+    "EMX319-006": ("abused", "🫱"),
+    "EMX319-007": ("academy", "🪢"),
+    "EMX319-008": ("accidents", "🔇"),
+    "EMX319-009": ("accompaniment", "🎟️"),
+    "EMX319-010": ("accomplish", "🪡"),
+    "EMX319-011": ("administered", "🝴"),
+    "EMX319-012": ("afro", "🫀"),
+    "EMX319-013": ("algae", "🐾"),
+    "EMX319-014": ("alimony", "🗃️"),
+    "EMX319-015": ("alligator", "🫧"),
+    "EMX319-016": ("allowance", "🗃️"),
+    "EMX319-017": ("aluminium", "🫧"),
+    "EMX319-018": ("aluminum", "🫧"),
+    "EMX319-019": ("amethyst", "🫧"),
+    "EMX319-020": ("ammonia", "🫧"),
+    "EMX319-021": ("amoeba", "🐾"),
+    "EMX319-022": ("amounts", "🗃️"),
+    "EMX319-023": ("amputated", "🤌"),
+    "EMX319-024": ("anatomy", "🖼"),
+    "EMX319-025": ("ankle", "🫀"),
+    "EMX319-026": ("ankles", "🫀"),
+    "EMX319-027": ("anus", "🫀"),
+    "EMX319-028": ("apocalypse", "🎟️"),
+    "EMX319-029": ("appraisal", "🗎"),
+    "EMX319-030": ("april", "🕰️"),
+    "EMX319-031": ("armpit", "🫀"),
+    "EMX319-032": ("armpits", "🫀"),
+    "EMX319-033": ("arsenic", "🫧"),
+    "EMX319-034": ("asbestos", "🫧"),
+    "EMX319-035": ("asphalt", "🫧"),
+    "EMX319-036": ("assassinate", "🫱"),
+    "EMX319-037": ("assassinated", "🫱"),
+}
+for _v319_undo_code, (_v319_removed_word, _v319_original_glyph) in EMOJIMAX_V319_REMOVALS_BY_UNDO_CODE.items():
+    semantic.pop(_v319_removed_word, None)
+
+# V321: four more broad-import associations that obscure the lyric word rather
+# than illustrating it.  The original glyph is retained for individual undo.
+EMOJIMAX_V321_REMOVALS_BY_UNDO_CODE: dict[str, tuple[str, str]] = {
+    "EMX321-001": ("murmur", "🎟️"),
+    "EMX321-002": ("backwards", "⏪"),
+    "EMX321-003": ("stack", "📚"),
+    "EMX321-004": ("bursting", "🌀"),
+}
+for _v321_undo_code, (_v321_removed_word, _v321_original_glyph) in EMOJIMAX_V321_REMOVALS_BY_UNDO_CODE.items():
+    semantic.pop(_v321_removed_word, None)
+
+# V332: "forget" and its inflections read naturally as lyric text; the archive
+# glyph was an associative guess rather than a useful visual substitution.
+EMOJIMAX_V332_REMOVALS_BY_UNDO_CODE: dict[str, tuple[str, str]] = {
+    "EMX332-001": ("forget", "🗃️"),
+    "EMX332-002": ("forgets", "🗃️"),
+    "EMX332-003": ("forgetting", "🗃️"),
+}
+for _v332_undo_code, (_v332_removed_word, _v332_original_glyph) in EMOJIMAX_V332_REMOVALS_BY_UNDO_CODE.items():
+    semantic.pop(_v332_removed_word, None)
+
+# V322: the remaining uses of these four overloaded symbols are all removed.
+# Build the ledger from the live dictionary so every word remains individually
+# reversible, even if the upstream candidate corpus changes its ordering.
+EMOJIMAX_V322_SYMBOL_CLEANUP = frozenset(("🎟️", "🌀", "⏪", "📚"))
+EMOJIMAX_V322_REMOVALS_BY_UNDO_CODE: dict[str, tuple[str, str]] = {
+    f"EMX322-{index:03d}": (word, glyph)
+    for index, (word, glyph) in enumerate(
+        sorted(((word, glyph) for word, glyph in semantic.items() if glyph in EMOJIMAX_V322_SYMBOL_CLEANUP), key=lambda item: item[0]),
+        start=1,
+    )
+}
+for _v322_undo_code, (_v322_removed_word, _v322_original_glyph) in EMOJIMAX_V322_REMOVALS_BY_UNDO_CODE.items():
+    semantic.pop(_v322_removed_word, None)
+
+# V322 explicit user preference: use the anatomical heart glyph for "heart".
+EMOJIMAX_V322_UPDATES_BY_UNDO_CODE: dict[str, tuple[str, str, str]] = {
+    "EMX322-U001": ("heart", semantic.get("heart", "❤️"), "🫀"),
+}
+for _v322_update_code, (_v322_updated_word, _v322_old_glyph, _v322_new_glyph) in EMOJIMAX_V322_UPDATES_BY_UNDO_CODE.items():
+    semantic[_v322_updated_word] = _v322_new_glyph
+
+# V324: keep the ten most-common symbols useful instead of allowing hundreds
+# of unrelated words to collapse into the same pictogram. Each symbol has at
+# most five word mappings; the preferred roots are retained first. Spiral is
+# intentionally the one allowed 🌀 mapping.
+_V324_SYMBOL_PREFERENCES: dict[str, tuple[str, ...]] = {
+    "🤌": ("pinch", "pinched", "pinching", "gesture", "gestures"),
+    "🫧": ("bubble", "bubbles", "bubbling", "foam", "foaming"),
+    "🫀": ("heart", "hearts", "heartbeat", "heartbeats", "cardiac"),
+    "🪢": ("knot", "knots", "tangle", "tangled", "tie"),
+    "🫶": ("love", "loved", "loving", "affection", "adore"),
+    "🫱": ("hand", "hands", "give", "giving", "reach"),
+    "🐾": ("paw", "paws", "footprint", "footprints", "tracks"),
+    "🦻": ("hearing", "deaf", "ear", "ears", "listen"),
+    "🌿": ("herb", "herbs", "leaf", "leaves", "weed"),
+    "🪡": ("needle", "needles", "sew", "sewing", "stitch"),
+}
+semantic["spiral"] = "🌀"
+EMOJIMAX_V324_LIMIT_REMOVALS: dict[str, tuple[str, str]] = {}
+_v324_removal_index = 1
+for _v324_glyph, _v324_preferred in _V324_SYMBOL_PREFERENCES.items():
+    _v324_words = sorted(word for word, glyph in semantic.items() if glyph == _v324_glyph)
+    _v324_keep = [word for word in _v324_preferred if word in _v324_words]
+    _v324_keep.extend(word for word in _v324_words if word not in _v324_keep)
+    _v324_keep = set(_v324_keep[:5])
+    for _v324_word in _v324_words:
+        if _v324_word not in _v324_keep:
+            EMOJIMAX_V324_LIMIT_REMOVALS[f"EMX324-{_v324_removal_index:03d}"] = (_v324_word, _v324_glyph)
+            _v324_removal_index += 1
+            semantic.pop(_v324_word, None)
+
+# V327 explicit Emoji 16.0 curation.  Keep these after the bulk candidate and
+# overuse-cleanup passes so an older generated mapping cannot win later.
+EMOJIMAX_V327_UPDATES_BY_UNDO_CODE: dict[str, tuple[str, str | None, str | None]] = {
+    "EMX327-U001": ("trees", semantic.get("trees"), "🌳🌳🌳"),
+    "EMX327-U002": ("evergreen", semantic.get("evergreen"), "🌲"),
+    "EMX327-U003": ("square", semantic.get("square"), "√"),
+    "EMX327-U004": ("rooted", semantic.get("rooted"), None),
+    "EMX327-U005": ("rooting", semantic.get("rooting"), None),
+    "EMX327-U006": ("harp", semantic.get("harp"), "🪉"),
+    "EMX327-U007": ("shovel", semantic.get("shovel"), "🪏"),
+    "EMX327-U008": ("dig", semantic.get("dig"), "🪏"),
+    "EMX327-U009": ("shoveling", semantic.get("shoveling"), "🪏ing"),
+    "EMX327-U010": ("fingerprint", semantic.get("fingerprint"), "🫆"),
+    "EMX327-U011": ("lie", semantic.get("lie"), None),
+}
+for _v327_code, (_v327_word, _v327_old, _v327_new) in EMOJIMAX_V327_UPDATES_BY_UNDO_CODE.items():
+    if _v327_new is None:
+        semantic.pop(_v327_word, None)
+    else:
+        semantic[_v327_word] = _v327_new
+
 SEMANTIC_PHRASES = {
     "hot dog": "🌭",
     "!!!!": "‼‼", "fuck you": "🖕",
@@ -10984,6 +11490,58 @@ SEMANTIC_PHRASES = {
     "so many": "🔢", "too dead": "💀", "lost mind": "🧠", "one of": "❶ of", "one more": "➕ ❶",
     "forever young": "♾️👶", "on fire": "🔥", "fall in love": "💘",
 }
+
+# V357: user-reviewed removals from survey entries #001-#020 in
+# emoji-symbol-survey-20260829-063935.log.  Filter by the reviewed output class
+# so all 952 rejected associations stay removed without duplicating a brittle
+# thousand-line word list. Any output containing U+25C7 is rejected as well.
+EMOJIMAX_V357_REJECTED_SURVEY_OUTPUTS = frozenset({
+    "🫴", "🕰️", "🗃️", "◇", "🫠", "🥇", "🤩", "🧭", "🙈", "👓",
+    "🖇️", "🎯", "🎲", "🗎", "🧻", "🫥", "💩", "🕳", "🧬", "🧾",
+})
+EMOJIMAX_V357_SURVEY_EXCEPTIONS = frozenset({
+    "melting", "first", "delighted", "spectacles", "roll",
+    "poo", "poop", "shit", "crap", "d.n.a.", "dna",
+})
+
+
+def _v357_rejected_emojimax_mapping(word: str, replacement: str) -> bool:
+    return (
+        word not in EMOJIMAX_V357_SURVEY_EXCEPTIONS
+        and (
+            replacement in EMOJIMAX_V357_REJECTED_SURVEY_OUTPUTS
+            or "◇" in replacement
+        )
+    )
+
+
+for _v357_word, _v357_replacement in tuple(semantic.items()):
+    if _v357_rejected_emojimax_mapping(str(_v357_word), str(_v357_replacement)):
+        semantic.pop(_v357_word, None)
+for _v357_phrase, _v357_replacement in tuple(SEMANTIC_PHRASES.items()):
+    if _v357_rejected_emojimax_mapping(str(_v357_phrase), str(_v357_replacement)):
+        SEMANTIC_PHRASES.pop(_v357_phrase, None)
+
+# Requested replacements are deliberately applied after the survey filter.
+EMOJIMAX_V357_REPLACEMENTS = {
+    "unseen": "🙈",
+    "unheard": "🙊",
+    "unspoken": "🙊",
+    "dice": "🎲🎲",
+    "bullshit": "🐂💩",
+    "bullshitting": "🐂💩ing",
+    "bullshitted": "🐂💩ed",
+}
+for _v357_word, _v357_replacement in EMOJIMAX_V357_REPLACEMENTS.items():
+    SEMANTIC_PHRASES.pop(_v357_word, None)
+    semantic[_v357_word] = _v357_replacement
+
+# V358: use ordinary enclosed-number glyphs for eighteen, not the adult-only
+# badge.  Both the written and numeric forms intentionally resolve alike.
+SEMANTIC_PHRASES.pop("eighteen", None)
+SEMANTIC_PHRASES.pop("18", None)
+semantic["eighteen"] = "①⑧"
+semantic["18"] = "①⑧"
 
 
 @lru_cache(maxsize=1)
@@ -11256,17 +11814,7 @@ def emojimax_plain_with_solutions(
         cursor = match.end()
     emit_literal(protected[cursor:])
 
-    def normalize_emojimax_spacing(value: str) -> str:
-        value = re.sub(
-            rf"([{re.escape(CIRCLED_NUMBER_GLYPHS)}])\s+(?=\S)",
-            lambda match: match.group(1) + "  ",
-            value,
-        )
-        return re.sub(r"(?:⬆️|⬇️) (?=\S)", lambda match: match.group(0).rstrip(), value)
-
-    result = normalize_emojimax_spacing("".join(pieces))
-    for item in solutions:
-        item["display"] = normalize_emojimax_spacing(str(item.get("display", "")))
+    result = re.sub(r"(?:⬆️|⬇️) (?=\S)", lambda match: match.group(0).rstrip(), "".join(pieces))
     return result.rstrip(), solutions
 
 
@@ -11286,14 +11834,15 @@ def stylize_karaoke_with_emojimax(
     force_emoji_when_enabled: bool = False,
     fade_threshold_percent: float | None = None,
     monochrome_safe: bool = False,
+    windows_terminal_compat: bool = False,
 ) -> str:
     """Apply cached Emojimaxx; monochrome popup mode may reject color-dependent substitutions."""
     clean_text = str(text).strip()
     threshold = HIDE_EMOJI_WHEN_FADE_IS_UNDER_X_PERCENT if fade_threshold_percent is None else float(fade_threshold_percent)
     emoji_visible = bool(enabled and (force_emoji_when_enabled or max(0.0, min(1.0, opacity)) * 100.0 >= threshold))
     if any(argument in {"--unit-tests", "-t"} for argument in sys.argv[1:]):
-        return _stylize_karaoke_with_emojimax_uncached.__wrapped__(clean_text, int(style), emoji_visible, bool(monochrome_safe))
-    return _stylize_karaoke_with_emojimax_uncached(clean_text, int(style), emoji_visible, bool(monochrome_safe))
+        return _stylize_karaoke_with_emojimax_uncached.__wrapped__(clean_text, int(style), emoji_visible, bool(monochrome_safe), bool(windows_terminal_compat))
+    return _stylize_karaoke_with_emojimax_uncached(clean_text, int(style), emoji_visible, bool(monochrome_safe), bool(windows_terminal_compat))
 
 
 @lru_cache(maxsize=4096)
@@ -11303,6 +11852,7 @@ def _stylize_karaoke_with_emojimax_uncached(
     style: int,
     emoji_visible: bool,
     monochrome_safe: bool = False,
+    windows_terminal_compat: bool = False,
 ) -> str:
     """Apply semantic emoji using whole words/phrases only, optionally color-agnostic."""
     text = text.strip()
@@ -11319,7 +11869,7 @@ def _stylize_karaoke_with_emojimax_uncached(
         suffix = r"(?!\w)" if phrase and (phrase[-1].isalnum() or phrase[-1] == "_") else ""
         replaced = re.sub(prefix + escaped + suffix, token, protected, flags=re.IGNORECASE)
         if replaced != protected:
-            phrase_tokens[token] = replacement
+            phrase_tokens[token] = windows_terminal_emojimax_replacement(replacement) if windows_terminal_compat else replacement
             protected = replaced
     wind_nonsubstitution_followers = {
         "up", "down", "left", "right", "clockwise", "counterclockwise",
@@ -11339,16 +11889,15 @@ def _stylize_karaoke_with_emojimax_uncached(
             follower = re.match(r"\s+([\w'-]+)", protected[match.end():])
             if follower and follower.group(1).casefold() in wind_nonsubstitution_followers:
                 replacement = None
-        pieces.append(stylize_karaoke_text(word, style) if replacement is None else replacement)
+        if replacement is None:
+            pieces.append(stylize_karaoke_text(word, style))
+        else:
+            pieces.append(windows_terminal_emojimax_replacement(replacement) if windows_terminal_compat else replacement)
         cursor = match.end()
     pieces.append(stylize_karaoke_text(protected[cursor:], style))
     result = "".join(pieces)
     for token, replacement in phrase_tokens.items():
         result = result.replace(stylize_karaoke_text(token, style), replacement).replace(token, replacement)
-    result = re.sub(
-        rf"([{re.escape(CIRCLED_NUMBER_GLYPHS)}])\s+(?=\S)",
-        lambda match: match.group(1) + "  ", result,
-    )
     result = re.sub(r"(?:⬆️|⬇️) (?=\S)", lambda match: match.group(0).rstrip(), result)
     return result.rstrip()
 
@@ -11428,7 +11977,21 @@ PLAYER_SETTING_DEFAULTS: dict[str, int] = {
     "KaraokeStyle": 1,
     "KaraokeTreatment": 2,  # Line Rainbow.
     "KaraokeEmojimax": 1,
+    "DecensorConsoleKaraoke": 0,
+    "DecensorArtworkLyrics": 0,
+    "DecensorFloatingLyrics": 0,
     "ConsoleKaraokeEnabled": 1,
+    # V310 Console Alerts. ReplayGain is intentionally continuous; the rest are
+    # one-shot per track and remain inspectable in the ? overlay.
+    "AlertNoReplayGain": 1,
+    "AlertMissingArtist": 1,
+    "AlertMissingTitle": 1,
+    "AlertMissingKaraoke": 0,
+    "AlertMissingLyrics": 0,
+    "AlertMissingArtwork": 0,
+    "AlertUnknownYear": 0,
+    "AlertUnknownGenre": 0,
+    "AlertEmbeddedLyricsMismatch": 1,
     "ProgressStyle": 1,
     "ProgressBarEnabled": 1,
     "ProgressBeatReactive": 1,
@@ -11490,7 +12053,18 @@ def load_player_settings() -> dict[str, int]:
     settings["FrequencyWarp"] = int(bool(settings.get("FrequencyWarp", DEFAULT_FREQUENCY_WARP_ENABLED)))
     settings["KaraokeStyle"] = min(len(KARAOKE_STYLE_NAMES), max(1, settings["KaraokeStyle"]))
     settings["KaraokeTreatment"] = min(len(KARAOKE_TREATMENT_NAMES), max(1, settings["KaraokeTreatment"]))
+    settings["DecensorConsoleKaraoke"] = int(bool(settings.get("DecensorConsoleKaraoke", 0)))
+    settings["DecensorArtworkLyrics"] = int(bool(settings.get("DecensorArtworkLyrics", 0)))
+    settings["DecensorFloatingLyrics"] = int(bool(settings.get("DecensorFloatingLyrics", 0)))
     settings["ConsoleKaraokeEnabled"] = int(bool(settings.get("ConsoleKaraokeEnabled", 1)))
+    for _alert_setting, _default in (
+        ("AlertNoReplayGain", 1), ("AlertMissingArtist", 1),
+        ("AlertMissingTitle", 1), ("AlertMissingKaraoke", 0),
+        ("AlertMissingLyrics", 0), ("AlertMissingArtwork", 0),
+        ("AlertUnknownYear", 0), ("AlertUnknownGenre", 0),
+        ("AlertEmbeddedLyricsMismatch", 1),
+    ):
+        settings[_alert_setting] = int(bool(settings.get(_alert_setting, _default)))
     settings["ProgressStyle"] = min(len(PROGRESS_STYLE_NAMES), max(1, settings["ProgressStyle"]))
     settings["ProgressBarEnabled"] = int(bool(settings.get("ProgressBarEnabled", 1)))
     settings["ProgressBeatReactive"] = int(bool(settings.get("ProgressBeatReactive", 1)))
@@ -13734,10 +14308,10 @@ def archive_noncanonical_history_database_after_verified_merge(
     return archive
 
 
-# Paths are deliberately only in-process cache keys. They are never written to
-# SQLite. Persistent history uses a cheap normalized filename key first, then
-# duration + normalized Artist/Title to disambiguate filename collisions.
-# The metadata cache lets duration + tags share one ffprobe result.
+# Full paths are never written to earned-history SQLite. Persistent history uses
+# a cheap normalized filename key first, then duration + normalized Artist/Title
+# to disambiguate filename collisions. V314 may retain full paths only in the
+# disposable temp metadata cache, guarded by exact file size + modification time.
 _AUDIO_STREAM_LAYOUT_CACHE: dict[str, tuple[int, int, int | None, str | None]] = {}
 _AUDIO_METADATA_CACHE: dict[str, tuple[int, int, float | None, dict[str, str]]] = {}
 # V88: complete ffprobe tag payload for Alt+3.  This is populated by the same
@@ -13756,6 +14330,13 @@ REPLAYGAIN_TAG_KEYS = (
     "replaygain_album_peak",
 )
 _PLAYLIST_HISTORY_IDENTITY_CACHE: dict[str, tuple[int, int, tuple[str, int, str]]] = {}
+# V314: the shuffle's small ambiguous/missing subset survives process restarts
+# in a temp JSON metadata cache. It is deliberately separate from the earned-
+# history SQLite database; full paths never become earned-history identities.
+_PLAYLIST_SHUFFLE_METADATA_CACHE: dict[str, tuple[int, int, float | None, dict[str, str]]] = {}
+_PLAYLIST_SHUFFLE_METADATA_CACHE_PATH: Path | None = None
+_PLAYLIST_SHUFFLE_METADATA_CACHE_DIRTY = False
+_PLAYLIST_SHUFFLE_METADATA_CACHE_LOCK = threading.RLock()
 _PLAYLIST_HISTORY_LAST_PLAYED_CACHE: dict[str, float] = {}
 _PLAYLIST_FULL_IDENTITY_LAST_PLAYED_CACHE: dict[str, float] = {}
 _PLAYLIST_FULL_HISTORY_BACKFILL_LOCK = threading.Lock()
@@ -13768,7 +14349,9 @@ _PLAYLIST_FULL_HISTORY_BACKFILL_STARTED = False
 _PLAYLIST_FULL_HISTORY_BACKFILL_READY = threading.Event()
 _PLAYLIST_FULL_HISTORY_BACKFILL_READY.set()
 # A shuffle visit is deliberately broader than an earned play.  The ordinary
-# local history still requires one-third and Last.fm >50% genuinely heard, but a file
+# local history normally requires one-third and Last.fm normally requires >50%
+# genuinely heard (a continuous full play of a <=30-second stream supersedes
+# both percentage rules), but a file
 # becomes ineligible for near-term shuffle repetition as soon as PAFPlayer
 # launches it.  Keep that second concept in its own cache/table so sampling and
 # skipping a track cannot make it immediately eligible again.
@@ -13934,6 +14517,92 @@ def cache_playlist_history_identity(
     except OSError:
         pass
     return identity
+
+
+def playlist_shuffle_metadata_cache_path() -> Path:
+    """Return the persistent, non-authoritative shuffle metadata cache path."""
+    override = os.environ.get("PLAY_AUDIO_FILE_SHUFFLE_METADATA_CACHE")
+    if override:
+        return Path(override)
+    return Path(tempfile.gettempdir()) / "play_audio_file" / "shuffle_metadata_cache.json"
+
+
+def _load_playlist_shuffle_metadata_cache() -> None:
+    """Load the size/mtime-validated metadata cache once per selected path."""
+    global _PLAYLIST_SHUFFLE_METADATA_CACHE_PATH
+    path = playlist_shuffle_metadata_cache_path()
+    with _PLAYLIST_SHUFFLE_METADATA_CACHE_LOCK:
+        if _PLAYLIST_SHUFFLE_METADATA_CACHE_PATH == path:
+            return
+        _PLAYLIST_SHUFFLE_METADATA_CACHE_PATH = path
+        _PLAYLIST_SHUFFLE_METADATA_CACHE.clear()
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if int(payload.get("version", 0)) != 1:
+                return
+            raw_entries = payload.get("entries", {})
+            if not isinstance(raw_entries, dict):
+                return
+            for cache_key, raw in raw_entries.items():
+                if not isinstance(raw, list) or len(raw) != 4 or not isinstance(raw[3], dict):
+                    continue
+                size, mtime_ns, duration, tags = raw
+                _PLAYLIST_SHUFFLE_METADATA_CACHE[str(cache_key)] = (
+                    int(size), int(mtime_ns),
+                    (None if duration is None else float(duration)),
+                    {str(key): str(value) for key, value in tags.items()},
+                )
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            # A cache miss/corrupt temp file is harmless; ffprobe remains the
+            # source of truth and the next successful save replaces it.
+            _PLAYLIST_SHUFFLE_METADATA_CACHE.clear()
+
+
+def save_playlist_shuffle_metadata_cache() -> None:
+    """Atomically persist metadata learned by the background shuffle worker."""
+    global _PLAYLIST_SHUFFLE_METADATA_CACHE_DIRTY
+    _load_playlist_shuffle_metadata_cache()
+    with _PLAYLIST_SHUFFLE_METADATA_CACHE_LOCK:
+        if not _PLAYLIST_SHUFFLE_METADATA_CACHE_DIRTY:
+            return
+        path = playlist_shuffle_metadata_cache_path()
+        entries = {
+            cache_key: [size, mtime_ns, duration, tags]
+            for cache_key, (size, mtime_ns, duration, tags) in _PLAYLIST_SHUFFLE_METADATA_CACHE.items()
+        }
+        payload = {"version": 1, "entries": entries}
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+            temporary.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            os.replace(temporary, path)
+            _PLAYLIST_SHUFFLE_METADATA_CACHE_DIRTY = False
+        except OSError:
+            return
+
+
+def playlist_shuffle_cached_metadata(track: Path) -> tuple[float | None, dict[str, str]]:
+    """Return full resolver metadata from RAM/temp cache, probing only on a miss."""
+    global _PLAYLIST_SHUFFLE_METADATA_CACHE_DIRTY
+    location = _audio_metadata_cache_location(Path(track))
+    if location is None:
+        return probe_audio_metadata(Path(track))
+    cache_key, size, mtime_ns = location
+    memory = _AUDIO_METADATA_CACHE.get(cache_key)
+    if memory is not None and memory[0] == size and memory[1] == mtime_ns:
+        return memory[2], dict(memory[3])
+    _load_playlist_shuffle_metadata_cache()
+    with _PLAYLIST_SHUFFLE_METADATA_CACHE_LOCK:
+        cached = _PLAYLIST_SHUFFLE_METADATA_CACHE.get(cache_key)
+    if cached is not None and cached[0] == size and cached[1] == mtime_ns:
+        return cached[2], dict(cached[3])
+    duration, tags = probe_audio_metadata(Path(track))
+    with _PLAYLIST_SHUFFLE_METADATA_CACHE_LOCK:
+        _PLAYLIST_SHUFFLE_METADATA_CACHE[cache_key] = (
+            size, mtime_ns, duration, dict(tags or {}),
+        )
+        _PLAYLIST_SHUFFLE_METADATA_CACHE_DIRTY = True
+    return duration, dict(tags or {})
 
 
 def playlist_history_identity(track: Path) -> tuple[str, int, str]:
@@ -14210,6 +14879,16 @@ def _playlist_history_backfill_legacy_identities(database: sqlite3.Connection) -
     return len(identities)
 
 
+class _ClosingPlaylistHistoryConnection(sqlite3.Connection):
+    """Commit/rollback like sqlite3.Connection, then release the file handle."""
+
+    def __exit__(self, exc_type, exc_value, traceback) -> bool:
+        try:
+            return bool(super().__exit__(exc_type, exc_value, traceback))
+        finally:
+            self.close()
+
+
 def playlist_history_connection() -> sqlite3.Connection:
     """Open history and transparently reunify the accidental filename fork.
 
@@ -14218,7 +14897,7 @@ def playlist_history_connection() -> sqlite3.Connection:
     risking two threads trying to archive the underscore companion simultaneously.
     """
     active_path = playlist_history_database_path()
-    database = sqlite3.connect(active_path)
+    database = sqlite3.connect(active_path, factory=_ClosingPlaylistHistoryConnection)
     database.execute("PRAGMA journal_mode=WAL")
     database.execute("PRAGMA synchronous=NORMAL")
     with _PLAYLIST_HISTORY_COMPANION_MERGE_LOCK:
@@ -14253,12 +14932,15 @@ def load_recent_playlist_visits(
     now: float | None = None,
     recent_seconds: float = SHUFFLE_RECENT_AVOID_SECONDS,
 ) -> dict[str, float]:
-    """Load the persisted launch ledger for the active shuffle-avoidance window.
+    """Load the optional legacy launch ledger when 3-hour avoidance is enabled.
 
-    This is one small indexed query at playlist startup.  It is intentionally
-    independent of the earned-play history and therefore catches tracks that
-    were sampled/skipped before reaching the local-history/scrobble threshold.
+    V307 disables this policy by default.  When disabled, do no SQLite work and
+    clear any in-process visit state so normal shuffle traversal is governed only
+    by the prepared history order rather than an elapsed-time rejection window.
     """
+    if not SHUFFLE_RECENT_AVOID_ENABLED:
+        _PLAYLIST_RECENT_VISIT_CACHE.clear()
+        return {}
     reference = time.time() if now is None else float(now)
     cutoff = reference - max(0.0, float(recent_seconds))
     try:
@@ -14289,7 +14971,9 @@ def playlist_shuffle_mark_visit(
     *,
     visited_at: float | None = None,
 ) -> bool:
-    """Mark a track ineligible for near-term shuffle repetition at launch time."""
+    """Persist a launch only when the optional legacy recent-avoid policy is on."""
+    if not SHUFFLE_RECENT_AVOID_ENABLED:
+        return False
     path_key = lexical_path_key(Path(track))
     when = time.time() if visited_at is None else float(visited_at)
     _PLAYLIST_RECENT_VISIT_CACHE[path_key] = when
@@ -14746,43 +15430,297 @@ def _prefetched_playlist_history_last_played(
     return playlist_history_resolve_filename_candidates(rows, duration_seconds=duration_seconds, tags=tags)
 
 
-def playlist_history_artist_title_last_played_sync(tags: dict[str, str] | None) -> float | None:
-    """Resolve imported Artist/Song history through one indexed exact identity lookup.
 
-    This is the correctness fallback that makes the 20-year import useful during
-    ordinary playback even when old logs had no local filename or a changed
-    duration. It is a two-column WITHOUT ROWID primary-key lookup, not a scan.
+def _playlist_history_track_number_hint(track: Path) -> int | None:
+    """Return a trustworthy current-track number hint without launching another probe.
+
+    V304 uses this only to prove that an old Last.fm title was polluted with
+    ``" - <album> <track>"``.  Prefer the already-cached raw metadata; fall back
+    to the conventional numeric filename prefix used throughout Claire's library.
     """
+    path = Path(track)
+    try:
+        raw = probe_audio_raw_tags(path)
+    except Exception:
+        raw = {}
+    for key in ("track", "tracknumber", "trck"):
+        value = str(raw.get(key, "") or "").strip()
+        match = re.match(r"^(\d{1,3})(?:\s*/\s*\d+)?\b", value)
+        if match:
+            number = int(match.group(1))
+            if number > 0:
+                return number
+    # Multi-disc prefixes such as 1-03 Song mean disc 1, track 03.
+    multi = re.match(r"^\s*\d{1,2}[ _-](\d{1,3})[ _.-]+", path.name)
+    if multi:
+        number = int(multi.group(1))
+        if number > 0:
+            return number
+    simple = re.match(r"^\s*(\d{1,3})[ _.-]+", path.name)
+    if simple:
+        number = int(simple.group(1))
+        if number > 0:
+            return number
+    return None
+
+
+def _playlist_history_polluted_suffix_matches_current_track(
+    polluted_title: str,
+    *,
+    current_title: str,
+    current_album: str,
+    track_number: int | None,
+) -> bool:
+    """Prove one old Last.fm ``title - album track`` corruption structurally.
+
+    This is intentionally *not* fuzzy title matching.  The historical title must
+    begin with the complete current title, followed by `` - ``; the remainder
+    must reduce to the complete current album plus the current track number.
+    Optional literal ``track`` text and leading zeroes are tolerated because the
+    old crawler emitted both forms.  Without album + track evidence we refuse to
+    manufacture an alias.
+    """
+    if not current_title or not current_album or not track_number:
+        return False
+    polluted = normalize_playlist_history_text(polluted_title)
+    title = normalize_playlist_history_text(current_title)
+    album = normalize_playlist_history_text(current_album)
+    if not polluted or not title or not album:
+        return False
+    prefix = title + " - "
+    if not polluted.startswith(prefix):
+        return False
+    suffix = polluted[len(prefix):].strip()
+    # The corrupted corpus contains both ``Album 10`` and ``Album track 10``.
+    match = re.match(r"^(.*?)(?:\s+track)?\s+0*(\d{1,3})$", suffix)
+    if not match:
+        return False
+    suffix_album = normalize_playlist_history_text(match.group(1))
+    try:
+        suffix_track = int(match.group(2))
+    except (TypeError, ValueError):
+        return False
+    return bool(suffix_album == album and suffix_track == int(track_number))
+
+
+def playlist_history_repair_polluted_lastfm_alias(
+    database: sqlite3.Connection,
+    track: Path,
+    *,
+    duration_seconds: float | int | None,
+    tags: dict[str, str],
+) -> float | None:
+    """Repair one proven old Last.fm title-pollution alias and return its play time.
+
+    The original historical identity is preserved as evidence.  Once a match is
+    proven from current Artist/Song/Album/track-number metadata, V304 additionally
+    writes the canonical Artist/Song row *and* the current filename/duration row.
+    Future HUD lookups and history shuffles therefore use the repaired identity
+    through their ordinary exact/filename indexes instead of repeating this path.
+    """
+    artist = re.sub(r"\s+", " ", history_punctuation_fold(str(tags.get("Artist", "") or ""))).strip()
+    title = re.sub(r"\s+", " ", history_punctuation_fold(str(tags.get("Song", "") or ""))).strip()
+    album = re.sub(r"\s+", " ", history_punctuation_fold(str(tags.get("Album", "") or ""))).strip()
+    artist_key = normalize_playlist_history_text(artist)
+    title_key = normalize_playlist_history_text(title)
+    if not artist_key or not title_key or not album:
+        return None
+    track_number = _playlist_history_track_number_hint(Path(track))
+    if not track_number:
+        return None
+    try:
+        rows = database.execute(
+            "SELECT title,duration_seconds,played_at FROM played_history_identities_recent "
+            "WHERE artist_key=? AND duration_seconds=1 AND title_key<>?",
+            (artist_key, title_key),
+        ).fetchall()
+    except sqlite3.Error:
+        return None
+    matches: list[tuple[str, float]] = []
+    for historical_title, historical_duration, played_at in rows:
+        try:
+            when = float(played_at)
+        except (TypeError, ValueError):
+            continue
+        if _playlist_history_polluted_suffix_matches_current_track(
+            str(historical_title or ""),
+            current_title=title,
+            current_album=album,
+            track_number=track_number,
+        ):
+            matches.append((str(historical_title or ""), when))
+    if not matches:
+        return None
+    newest = max(when for _old_title, when in matches)
+    filename_key = playlist_history_filename_key(Path(track))
+    try:
+        numeric = float(duration_seconds) if duration_seconds is not None else 0.0
+        duration = max(1, int(round(numeric))) if math.isfinite(numeric) and numeric > 0 else 0
+    except (TypeError, ValueError):
+        duration = 0
+    playlist_history_mark_artist_title_played(
+        artist, title, duration, played_at=newest, filename=filename_key, database=database
+    )
+    if filename_key and duration > 0:
+        playlist_history_mark_identity_played(
+            filename_key, duration, playlist_history_tag_key(tags), played_at=newest, database=database
+        )
+    database.commit()
+    append_pafplayer_trace(
+        "history.alias-repair.v304",
+        track=track,
+        artist=artist,
+        title=title,
+        album=album,
+        track_number=track_number,
+        historical_titles=" | ".join(old for old, _when in matches),
+        played_at=newest,
+    )
+    _PLAYLIST_FULL_IDENTITY_LAST_PLAYED_CACHE["\x1f".join((artist_key, title_key))] = newest
+    _PLAYLIST_HISTORY_LAST_PLAYED_CACHE.pop(playlist_history_runtime_key(Path(track)), None)
+    return newest
+
+
+
+_HISTORY_IDENTITY_TIME_UNSET = object()
+
+
+def playlist_history_resolve_authoritative_loaded(
+    track: Path,
+    *,
+    duration_seconds: float | int | None,
+    tags: dict[str, str] | None,
+    filename_candidates: list[tuple[int, str, float]] | tuple[tuple[int, str, float], ...] = (),
+    filename_checked: bool = True,
+    identity_played_at=_HISTORY_IDENTITY_TIME_UNSET,
+    database: sqlite3.Connection | None = None,
+    allow_alias_repair: bool = True,
+) -> float | None:
+    """Resolve one track's Last play from every safe identity source.
+
+    V308 is the single final-resolution engine used by bulk shuffle scoring,
+    playlist browsing, and the synchronous playback fallback.  A basename match
+    is accepted only through the v285 duration/tag safety contract.  Exact
+    Artist+Song history is considered independently, and the newest trustworthy
+    timestamp wins.  A structured v304 Last.fm alias repair is attempted only
+    after an exact Artist+Song miss.  ``None`` means *not yet authoritative*;
+    ``0.0`` means every available source was checked and the track is genuinely
+    Never according to the current database.
+    """
+    path = Path(track)
+    best = 0.0
+    candidates = list(filename_candidates or ())
+    filename_match = playlist_history_resolve_filename_candidates(
+        candidates,
+        duration_seconds=duration_seconds,
+        tags=tags,
+    )
+    if filename_match is not None:
+        try:
+            best = max(best, float(filename_match))
+        except (TypeError, ValueError):
+            pass
+
+    tag_key = playlist_history_tag_key(tags or {}) if tags else ""
+    artist_key, separator, title_key = tag_key.partition("\x1f")
+    usable_identity = bool(separator and artist_key and title_key)
+    exact_identity_time = identity_played_at
+    identity_checked = not usable_identity
+
+    if usable_identity and exact_identity_time is _HISTORY_IDENTITY_TIME_UNSET:
+        if tag_key in _PLAYLIST_FULL_IDENTITY_LAST_PLAYED_CACHE:
+            exact_identity_time = _PLAYLIST_FULL_IDENTITY_LAST_PLAYED_CACHE[tag_key]
+            identity_checked = True
+        elif database is not None:
+            try:
+                row = database.execute(
+                    "SELECT played_at FROM played_history_identities_recent "
+                    "WHERE artist_key=? AND title_key=?",
+                    (artist_key, title_key),
+                ).fetchone()
+            except sqlite3.Error:
+                row = None
+            exact_identity_time = None if row is None else row[0]
+            identity_checked = True
+        else:
+            exact_identity_time = _HISTORY_IDENTITY_TIME_UNSET
+
+    if usable_identity and exact_identity_time is not _HISTORY_IDENTITY_TIME_UNSET:
+        identity_checked = True
+        if exact_identity_time is not None:
+            try:
+                exact_when = float(exact_identity_time)
+            except (TypeError, ValueError):
+                exact_when = 0.0
+            if exact_when > 0.0:
+                best = max(best, exact_when)
+                _PLAYLIST_FULL_IDENTITY_LAST_PLAYED_CACHE[tag_key] = exact_when
+        elif allow_alias_repair and database is not None and best <= 0.0:
+            repaired = playlist_history_repair_polluted_lastfm_alias(
+                database,
+                path,
+                duration_seconds=duration_seconds,
+                tags=tags or {},
+            )
+            if repaired is not None:
+                best = max(best, float(repaired))
+
+    # Do not publish even a positive timestamp as authoritative until every
+    # available identity source for this track has been checked; the unchecked
+    # source could contain a newer play.  This keeps HUD, playlist view and
+    # shuffle scoring from disagreeing merely because one cache happened to be
+    # warmer than another.
+    all_sources_checked = bool(filename_checked and identity_checked)
+    if best > 0.0 and all_sources_checked:
+        return best
+
+    # A DB/CSV reconciliation in flight, or an unqueried filename/Artist+Song
+    # source on the nonblocking startup path, makes absence/provisional history
+    # unknown.  Never cache that as zero.
+    if not all_sources_checked or not _PLAYLIST_FULL_HISTORY_BACKFILL_READY.is_set():
+        return None
+
+    return 0.0
+
+
+def playlist_history_artist_title_last_played_sync(
+    tags: dict[str, str] | None,
+    *,
+    track: Path | None = None,
+    duration_seconds: float | int | None = None,
+) -> float | None:
+    """Resolve exact Artist/Song history through the V308 authoritative engine."""
     if not tags:
         return None
     tag_key = playlist_history_tag_key(tags)
     artist_key, separator, title_key = tag_key.partition("\x1f")
     if not separator or not artist_key or not title_key:
         return None
-    cached = _PLAYLIST_FULL_IDENTITY_LAST_PLAYED_CACHE.get(tag_key)
-    if cached is not None:
-        return float(cached)
     try:
         with playlist_history_connection() as database:
             row = database.execute(
                 "SELECT played_at FROM played_history_identities_recent WHERE artist_key=? AND title_key=?",
                 (artist_key, title_key),
             ).fetchone()
+            resolved = playlist_history_resolve_authoritative_loaded(
+                Path(track) if track is not None else Path(title_key),
+                duration_seconds=duration_seconds,
+                tags=tags,
+                filename_candidates=(),
+                identity_played_at=(None if row is None else row[0]),
+                database=database,
+                allow_alias_repair=track is not None,
+            )
     except (OSError, sqlite3.Error):
         return None
-    if row is None:
-        # While the large Last.fm CSV is still reconciling into SQLite, absence
-        # is not evidence of "Never".  Do not poison either cache with zero.
-        if not _PLAYLIST_FULL_HISTORY_BACKFILL_READY.is_set():
-            return None
-        _PLAYLIST_FULL_IDENTITY_LAST_PLAYED_CACHE[tag_key] = 0.0
+    if resolved is None or float(resolved) <= 0.0:
+        if resolved == 0.0:
+            _PLAYLIST_FULL_IDENTITY_LAST_PLAYED_CACHE[tag_key] = 0.0
         return None
-    try:
-        when = float(row[0])
-    except (TypeError, ValueError):
-        return None
-    _PLAYLIST_FULL_IDENTITY_LAST_PLAYED_CACHE[tag_key] = when
-    return when if when > 0 else None
+    _PLAYLIST_FULL_IDENTITY_LAST_PLAYED_CACHE[tag_key] = float(resolved)
+    return float(resolved)
+
+
 
 
 def playlist_history_last_played(
@@ -14791,60 +15729,86 @@ def playlist_history_last_played(
     duration_seconds: float | int | None = None,
     tags: dict[str, str] | None = None,
 ) -> float | None:
-    """Return Last-heard state without ever issuing startup-path SQL.
+    """Return cached/nonblocking Last-play state through the V308 resolver.
 
-    Playlist scoring fills the runtime cache in a background worker. Targeted
-    filename prefetch can fill a second cache while the previous track plays.
-    If neither cache is ready, startup deliberately returns unknown instead of
-    blocking the speakers on SQLite.
+    No SQLite query is issued on the playback startup path.  Bulk shuffle scoring
+    and targeted background prefetches populate the same caches consumed here.
     """
-    runtime_key = playlist_history_runtime_key(track)
+    path = Path(track)
+    runtime_key = playlist_history_runtime_key(path)
     if runtime_key in _PLAYLIST_HISTORY_LAST_PLAYED_CACHE:
         return _PLAYLIST_HISTORY_LAST_PLAYED_CACHE[runtime_key]
-    prefetched = _prefetched_playlist_history_last_played(track, duration_seconds, tags)
-    if prefetched is None:
-        prefetched = playlist_history_artist_title_last_played_sync(tags)
-    if prefetched is not None:
-        _PLAYLIST_HISTORY_LAST_PLAYED_CACHE[runtime_key] = prefetched
-    return prefetched
+    filename_key = playlist_history_filename_key(path)
+    with _PLAYLIST_HISTORY_PREFETCH_LOCK:
+        filename_checked = filename_key in _PLAYLIST_HISTORY_PREFETCH_ROWS
+        candidates = list(_PLAYLIST_HISTORY_PREFETCH_ROWS.get(filename_key, ()))
+    tag_key = playlist_history_tag_key(tags or {}) if tags else ""
+    identity_value = (
+        _PLAYLIST_FULL_IDENTITY_LAST_PLAYED_CACHE[tag_key]
+        if tag_key and tag_key in _PLAYLIST_FULL_IDENTITY_LAST_PLAYED_CACHE
+        else _HISTORY_IDENTITY_TIME_UNSET
+    )
+    resolved = playlist_history_resolve_authoritative_loaded(
+        path,
+        duration_seconds=duration_seconds,
+        tags=tags,
+        filename_candidates=candidates,
+        filename_checked=filename_checked,
+        identity_played_at=identity_value,
+        database=None,
+        allow_alias_repair=False,
+    )
+    if resolved is not None:
+        _PLAYLIST_HISTORY_LAST_PLAYED_CACHE[runtime_key] = float(resolved)
+    return resolved
+
+
 
 
 def playlist_history_last_played_sync_candidate(track: Path) -> float | None:
-    """Resolve one transition candidate safely and warm the shared history caches."""
-    track = Path(track)
-    runtime_key = playlist_history_runtime_key(track)
-    cached = _PLAYLIST_HISTORY_LAST_PLAYED_CACHE.get(runtime_key)
-    if cached is not None:
-        return float(cached)
-    filename_key = playlist_history_filename_key(track)
-    if not filename_key:
-        return None
+    """Synchronously resolve one track with the exact V308 authoritative engine."""
+    path = Path(track)
+    runtime_key = playlist_history_runtime_key(path)
+    if runtime_key in _PLAYLIST_HISTORY_LAST_PLAYED_CACHE:
+        return float(_PLAYLIST_HISTORY_LAST_PLAYED_CACHE[runtime_key])
+    filename_key = playlist_history_filename_key(path)
+    try:
+        duration, tags = probe_audio_metadata(path)
+    except Exception:
+        duration, tags = None, {}
     try:
         with playlist_history_connection() as database:
             rows = database.execute(
                 "SELECT duration_seconds, tag, played_at FROM played_tracks_recent WHERE filename=?",
                 (filename_key,),
-            ).fetchall()
+            ).fetchall() if filename_key else []
+            candidates = [(int(d), str(tag), float(when)) for d, tag, when in rows]
+            tag_key = playlist_history_tag_key(tags or {}) if tags else ""
+            artist_key, separator, title_key = tag_key.partition("\x1f")
+            identity_row = None
+            if separator and artist_key and title_key:
+                identity_row = database.execute(
+                    "SELECT played_at FROM played_history_identities_recent WHERE artist_key=? AND title_key=?",
+                    (artist_key, title_key),
+                ).fetchone()
+            resolved = playlist_history_resolve_authoritative_loaded(
+                path,
+                duration_seconds=duration,
+                tags=tags,
+                filename_candidates=candidates,
+                identity_played_at=(None if identity_row is None else identity_row[0]),
+                database=database,
+                allow_alias_repair=True,
+            )
     except (OSError, sqlite3.Error):
         return None
-    candidates = [(int(duration), str(tag), float(played_at)) for duration, tag, played_at in rows]
     with _PLAYLIST_HISTORY_PREFETCH_LOCK:
-        _PLAYLIST_HISTORY_PREFETCH_ROWS[filename_key] = list(candidates)
-    try:
-        duration, tags = probe_audio_metadata(track)
-    except Exception:
-        duration, tags = None, None
-    resolved = playlist_history_resolve_filename_candidates(candidates, duration_seconds=duration, tags=tags)
-    played_at = float(resolved or 0.0)
-    if played_at <= 0.0 and tags:
-        full_identity = playlist_history_artist_title_last_played_sync(tags)
-        if full_identity is not None:
-            played_at = float(full_identity)
-        elif not _PLAYLIST_FULL_HISTORY_BACKFILL_READY.is_set():
-            # Unknown until the authoritative Last.fm reconciliation finishes.
-            return None
-    _PLAYLIST_HISTORY_LAST_PLAYED_CACHE[runtime_key] = played_at
-    return played_at
+        if filename_key:
+            _PLAYLIST_HISTORY_PREFETCH_ROWS[filename_key] = list(candidates)
+    if resolved is not None:
+        _PLAYLIST_HISTORY_LAST_PLAYED_CACHE[runtime_key] = float(resolved)
+    return resolved
+
 
 
 def playlist_track_was_recently_played(
@@ -14854,15 +15818,13 @@ def playlist_track_was_recently_played(
     recent_seconds: float = SHUFFLE_RECENT_AVOID_SECONDS,
     allow_sync_fallback: bool = False,
 ) -> bool:
-    """Return whether this track was earned-played or merely visited very recently.
+    """Return legacy recent-window status when that optional policy is enabled.
 
-    Motivation: the history-ranked shuffle already pushes old/never-played tracks
-    forward, but a cached queue, resume transition, or still-building shuffle can
-    nevertheless propose a track heard only minutes ago.  This lookup is deliberately
-    non-blocking: it uses the runtime/prefetch caches and never issues a synchronous
-    SQLite query on the transition path. Unknown history therefore means "not known
-    recent" rather than stalling playback.
+    V307 leaves the old 3-hour machinery available behind the top-of-file
+    SHUFFLE_RECENT_AVOID_ENABLED switch, but normal playback keeps it disabled.
     """
+    if not SHUFFLE_RECENT_AVOID_ENABLED:
+        return False
     path = Path(track)
     earned_when = playlist_history_last_played(path)
     if earned_when is None and allow_sync_fallback:
@@ -14888,15 +15850,14 @@ def shuffle_candidate_avoiding_recent(
     now: float | None = None,
     recent_seconds: float = SHUFFLE_RECENT_AVOID_SECONDS,
 ) -> Path:
-    """Replace a <3-hour shuffle proposal with the next safe candidate, bounded by order length.
+    """Apply the optional legacy recent-window substitution policy.
 
-    Motivation: "search for another" must never become an unbounded random retry
-    loop.  If the proposed shuffle candidate is recent, walk forward through at
-    most one complete queue cycle.  Skip the current physical file and other recent
-    tracks.  The first distinct, existing, non-recent candidate wins.  If every
-    possible candidate is recent/missing/current, return the original proposal so
-    playback still makes progress rather than hanging forever.
+    With V307's default SHUFFLE_RECENT_AVOID_ENABLED=False this is an identity
+    function: the prepared shuffle order is authoritative and elapsed wall-clock
+    time cannot recycle/reject tracks behind its back.
     """
+    if not SHUFFLE_RECENT_AVOID_ENABLED:
+        return Path(proposed_track)
     if not order:
         return Path(proposed_track)
     proposed = Path(proposed_track)
@@ -15035,120 +15996,228 @@ def playlist_history_mark_played(
         return False
 
 
+
+def _playlist_history_infer_filename_identity(
+    filename_key: str,
+    candidates: list[tuple[int, str, float]] | tuple[tuple[int, str, float], ...],
+) -> tuple[str, int, str] | None:
+    """Infer an unambiguous cached identity without touching the audio file.
+
+    One filename row is authoritative for the filename-first contract. Multiple
+    rows are also safe when every usable row names the same Artist/Song; format
+    conversions and small duration changes commonly create exactly that shape.
+    A genuine multi-identity collision returns ``None`` and earns a lazy probe.
+    """
+    rows = list(candidates or ())
+    if not rows:
+        return None
+    if len(rows) == 1:
+        duration, tag, _played_at = rows[0]
+        return filename_key, int(duration), normalize_playlist_history_stored_tag(str(tag))
+    usable_tags = {
+        normalize_playlist_history_stored_tag(str(tag))
+        for _duration, tag, _played_at in rows
+        if playlist_history_tag_is_usable(str(tag))
+    }
+    if len(usable_tags) != 1:
+        return None
+    tag = next(iter(usable_tags))
+    matching = [
+        (int(duration), float(played_at))
+        for duration, stored_tag, played_at in rows
+        if normalize_playlist_history_stored_tag(str(stored_tag)) == tag
+    ]
+    duration = max(matching, key=lambda item: item[1])[0] if matching else 0
+    return filename_key, duration, tag
+
+
+def _playlist_history_metadata_from_identity(
+    identity: tuple[str, int, str],
+) -> tuple[float | None, dict[str, str]]:
+    """Translate cached shuffle identity data to the authoritative resolver API."""
+    _filename, duration, tag = identity
+    artist, separator, title = normalize_playlist_history_stored_tag(tag).partition("\x1f")
+    tags = {"Artist": artist, "Song": title} if separator and artist and title else {}
+    return (float(duration) if int(duration) > 0 else None), tags
+
+
 def playlist_history_scores(entries: list[Path], status_callback=None, progress_callback=None) -> list[tuple[float, Path]]:
-    """Bulk-score a playlist while applying the v285 Artist+Song safety rule."""
+    """Bulk-score with one SQL session and lazy, persistent metadata probes.
+
+    V314 accepts unambiguous filename history immediately, including repeated
+    rows that all identify the same Artist/Song. Only missing filename buckets
+    and genuine collisions touch ffprobe. Those identities are cached by full
+    path + size + mtime in temp storage, so later expired shuffle rebuilds avoid
+    rereading unchanged files. The final score still runs through the shared
+    V308 authoritative resolver and considers newer exact Artist/Song history.
+    """
     if not entries:
         return []
     if status_callback is not None:
         status_callback(True)
     try:
-        filename_keys = [playlist_history_filename_key(entry) for entry in entries]
+        if not _PLAYLIST_FULL_HISTORY_BACKFILL_READY.is_set():
+            _PLAYLIST_FULL_HISTORY_BACKFILL_READY.wait()
+
+        paths = [Path(entry) for entry in entries]
+        filename_keys = [playlist_history_filename_key(entry) for entry in paths]
         rows_by_filename: dict[str, list[tuple[int, str, float]]] = {}
         unique_filenames = sorted({key for key in filename_keys if key})
-        total_work = len(unique_filenames) + len(entries)
+        # Query + identity preparation + final resolution are separate progress
+        # stages so a cold cache never looks frozen during its small lazy subset.
+        total_work = len(unique_filenames) + (2 * len(paths))
         completed_work = 0
         if progress_callback is not None:
             progress_callback(completed_work, total_work, "query")
+
         with playlist_history_connection() as database:
             for offset in range(0, len(unique_filenames), 900):
                 batch = unique_filenames[offset:offset + 900]
-                if not batch: continue
+                if not batch:
+                    continue
                 placeholders = ",".join("?" for _ in batch)
                 rows = database.execute(
                     "SELECT filename, duration_seconds, tag, played_at "
-                    f"FROM played_tracks_recent WHERE filename IN ({placeholders})", batch,
+                    f"FROM played_tracks_recent WHERE filename IN ({placeholders})",
+                    batch,
                 ).fetchall()
                 for filename, duration_seconds, tag, played_at in rows:
-                    rows_by_filename.setdefault(str(filename), []).append((int(duration_seconds), str(tag), float(played_at)))
+                    rows_by_filename.setdefault(str(filename), []).append(
+                        (int(duration_seconds), str(tag), float(played_at))
+                    )
                 completed_work += len(batch)
                 if progress_callback is not None:
                     progress_callback(completed_work, total_work, "query")
-        with _PLAYLIST_HISTORY_PREFETCH_LOCK:
-            for filename_key, candidates in rows_by_filename.items():
-                _PLAYLIST_HISTORY_PREFETCH_ROWS[filename_key] = list(candidates)
 
-        # Resolve metadata only where a basename bucket exists; then bulk-fetch exact
-        # Artist+Song fallback identities for renamed files without an N-query loop.
-        identities: list[tuple[str, str]] = []
-        metadata_by_runtime: dict[str, tuple[float | None, dict[str, str]]] = {}
-        for entry, filename_key in zip(entries, filename_keys):
-            if not rows_by_filename.get(filename_key):
-                continue
-            try:
-                duration, tags = probe_audio_metadata(entry)
-            except Exception:
-                continue
-            metadata_by_runtime[playlist_history_runtime_key(entry)] = (duration, tags)
-            tag_key = playlist_history_tag_key(tags)
-            artist_key, sep, title_key = tag_key.partition("\x1f")
-            if sep and artist_key and title_key:
-                identities.append((artist_key, title_key))
-        identity_times: dict[tuple[str, str], float] = {}
-        unique_identities = list(dict.fromkeys(identities))
-        if unique_identities:
-            try:
-                with playlist_history_connection() as database:
-                    for offset in range(0, len(unique_identities), 300):
-                        batch = unique_identities[offset:offset + 300]
-                        where = " OR ".join("(artist_key=? AND title_key=?)" for _ in batch)
-                        params = [part for pair in batch for part in pair]
-                        for artist_key, title_key, played_at in database.execute(
-                            "SELECT artist_key,title_key,played_at FROM played_history_identities_recent WHERE " + where,
-                            params,
-                        ).fetchall():
-                            key=(str(artist_key),str(title_key)); identity_times[key]=max(identity_times.get(key,0.0), float(played_at))
-            except sqlite3.Error:
-                pass
+            with _PLAYLIST_HISTORY_PREFETCH_LOCK:
+                for filename_key in unique_filenames:
+                    _PLAYLIST_HISTORY_PREFETCH_ROWS[filename_key] = list(
+                        rows_by_filename.get(filename_key, ())
+                    )
 
-        scored: list[tuple[float, Path]] = []
-        if progress_callback is not None:
-            progress_callback(completed_work, total_work, "resolve")
-        for entry, filename_key in zip(entries, filename_keys):
-            candidates = rows_by_filename.get(filename_key, [])
-            played_at = 0.0
-            tags: dict[str,str] | None = None
-            duration = None
-            if candidates:
-                cached_meta = metadata_by_runtime.get(playlist_history_runtime_key(entry))
-                if cached_meta is None:
-                    try: cached_meta = probe_audio_metadata(entry)
-                    except Exception: cached_meta = None
-                if cached_meta is not None:
-                    duration, tags = cached_meta
-                played_at = float(playlist_history_resolve_filename_candidates(candidates, duration_seconds=duration, tags=tags) or 0.0)
-            if played_at <= 0.0 and tags:
-                tag_key=playlist_history_tag_key(tags); artist_key,sep,title_key=tag_key.partition("\x1f")
-                if sep and artist_key and title_key:
-                    played_at=float(identity_times.get((artist_key,title_key),0.0) or 0.0)
-            scored.append((played_at, entry))
-            _PLAYLIST_HISTORY_LAST_PLAYED_CACHE[playlist_history_runtime_key(entry)] = played_at
-            completed_work += 1
-            if progress_callback is not None:
-                progress_callback(completed_work, total_work, "resolve")
+            metadata_by_runtime: dict[str, tuple[float | None, dict[str, str]]] = {}
+            identities: list[tuple[str, str]] = []
+            for entry, filename_key in zip(paths, filename_keys):
+                candidates = rows_by_filename.get(filename_key, ())
+                identity = _playlist_history_infer_filename_identity(filename_key, candidates)
+                if identity is None:
+                    try:
+                        duration, tags = playlist_shuffle_cached_metadata(entry)
+                    except Exception:
+                        duration, tags = None, {}
+                else:
+                    duration, tags = _playlist_history_metadata_from_identity(identity)
+                metadata_by_runtime[playlist_history_runtime_key(entry)] = (duration, dict(tags))
+                tag_key = playlist_history_tag_key(tags) if tags else ""
+                artist_key, separator, title_key = tag_key.partition("\x1f")
+                if separator and artist_key and title_key:
+                    identities.append((artist_key, title_key))
+                completed_work += 1
+                if progress_callback is not None:
+                    progress_callback(completed_work, total_work, "metadata")
+
+            identity_times: dict[tuple[str, str], float] = {}
+            unique_identities = list(dict.fromkeys(identities))
+            scored: list[tuple[float, Path]] = []
+            for offset in range(0, len(unique_identities), 300):
+                batch = unique_identities[offset:offset + 300]
+                if not batch:
+                    continue
+                where = " OR ".join("(artist_key=? AND title_key=?)" for _ in batch)
+                params = [part for pair in batch for part in pair]
+                for artist_key, title_key, played_at in database.execute(
+                    "SELECT artist_key,title_key,played_at FROM played_history_identities_recent WHERE " + where,
+                    params,
+                ).fetchall():
+                    key = (str(artist_key), str(title_key))
+                    identity_times[key] = max(identity_times.get(key, 0.0), float(played_at))
+                    _PLAYLIST_FULL_IDENTITY_LAST_PLAYED_CACHE["\x1f".join(key)] = identity_times[key]
+
+            for entry, filename_key in zip(paths, filename_keys):
+                duration, tags = metadata_by_runtime[playlist_history_runtime_key(entry)]
+                tag_key = playlist_history_tag_key(tags or {}) if tags else ""
+                artist_key, separator, title_key = tag_key.partition("\x1f")
+                identity_value = (
+                    identity_times.get((artist_key, title_key))
+                    if separator and artist_key and title_key
+                    else _HISTORY_IDENTITY_TIME_UNSET
+                )
+                # For a usable exact identity, ``dict.get`` returning None means
+                # the batched query definitively found no row; that distinction
+                # enables structured alias repair.  With no usable identity we
+                # leave the source unset and let filename evidence stand alone.
+                if separator and artist_key and title_key and (artist_key, title_key) not in identity_times:
+                    identity_value = None
+                resolved = playlist_history_resolve_authoritative_loaded(
+                    entry,
+                    duration_seconds=duration,
+                    tags=tags,
+                    filename_candidates=rows_by_filename.get(filename_key, ()),
+                    identity_played_at=identity_value,
+                    database=database,
+                    allow_alias_repair=True,
+                )
+                # Backfill readiness was awaited above, so None here means an IO/
+                # metadata uncertainty rather than Never.  Do not poison the
+                # shared cache; score it as Never only for this one ordering pass
+                # if no better identity is possible.  Normal files resolve 0.0.
+                score = 0.0 if resolved is None else float(resolved)
+                scored.append((score, entry))
+                if resolved is not None:
+                    _PLAYLIST_HISTORY_LAST_PLAYED_CACHE[playlist_history_runtime_key(entry)] = float(resolved)
+                completed_work += 1
+                if progress_callback is not None:
+                    progress_callback(completed_work, total_work, "resolve")
+        save_playlist_shuffle_metadata_cache()
         return scored
     finally:
         if status_callback is not None:
             status_callback(False)
 
 
+
 def history_decile_shuffle_from_scores(scored: list[tuple[float, Path]], preferred_first: Path | None = None) -> list[Path]:
-    """Randomize only within ten global oldest→newest history buckets."""
+    """Shuffle Never as bucket 0, then ten oldest→newest known-play deciles.
+
+    V307 deliberately removes Never from the population used to calculate the ten
+    historical deciles.  Every unknown/never-played track is randomized together
+    first; only positive timestamps are then ranked and split into ten equal
+    populations.  Thus the newest known plays remain in the newest known-history
+    decile regardless of how many Never entries the playlist contains.
+    """
     if not scored:
         return []
-    ranked=[(float(played_at),Path(entry)) for played_at,entry in scored]
-    random.shuffle(ranked)  # fair ties, especially Never==0
-    ranked.sort(key=lambda item:item[0])
-    order: list[Path]=[]; total=len(ranked)
+    never: list[Path] = []
+    known: list[tuple[float, Path]] = []
+    for played_at, entry in scored:
+        when = float(played_at)
+        if when <= 0.0:
+            never.append(Path(entry))
+        else:
+            known.append((when, Path(entry)))
+
+    # Shuffle before sorting so equal known timestamps do not inherit playlist
+    # source order; Python's stable sort then preserves that randomized tie order.
+    random.shuffle(never)
+    random.shuffle(known)
+    known.sort(key=lambda item: item[0])
+
+    order: list[Path] = list(never)
+    total_known = len(known)
     for decile in range(10):
-        start=total*decile//10; end=total*(decile+1)//10
-        if end<=start: continue
-        bucket=[entry for _played_at,entry in ranked[start:end]]
-        random.shuffle(bucket); order.extend(bucket)
+        start = total_known * decile // 10
+        end = total_known * (decile + 1) // 10
+        if end <= start:
+            continue
+        bucket = [entry for _played_at, entry in known[start:end]]
+        random.shuffle(bucket)
+        order.extend(bucket)
+
     if preferred_first is not None:
-        key=lexical_path_key(Path(preferred_first))
-        index=next((i for i,item in enumerate(order) if lexical_path_key(item)==key),-1)
-        if index>0:
-            order[0],order[index]=order[index],order[0]
+        key = lexical_path_key(Path(preferred_first))
+        index = next((i for i, item in enumerate(order) if lexical_path_key(item) == key), -1)
+        if index > 0:
+            order[0], order[index] = order[index], order[0]
     return order
 
 
@@ -15169,7 +16238,7 @@ def choose_least_recent_playlist_track(
 
 
 def build_playlist_shuffle_order(entries: list[Path], status_callback=None) -> list[Path]:
-    """Build one strict ten-decile oldest→newest history shuffle."""
+    """Build Never bucket 0 followed by ten known-history deciles."""
     if not entries: return []
     try: scored=playlist_history_scores(entries,status_callback)
     except sqlite3.Error:
@@ -15178,17 +16247,23 @@ def build_playlist_shuffle_order(entries: list[Path], status_callback=None) -> l
 
 
 def build_playlist_shuffle_order_progressive(entries: list[Path], progress_callback=None) -> list[Path]:
-    """Score in visible chunks, then globally decile-rank the complete playlist."""
+    """Score once while presenting ten lightweight progress bands."""
     if not entries:
         if progress_callback is not None: progress_callback("historical shuffling done")
         return []
-    scored: list[tuple[float,Path]]=[]
+    last_band = [-1]
+
+    def report_scoring_progress(completed: int, total: int, _stage: str) -> None:
+        if progress_callback is None:
+            return
+        percent = 100 if total <= 0 else min(99, max(0, int(completed) * 100 // int(total)))
+        band = min(9, percent // 10)
+        if band != last_band[0]:
+            last_band[0] = band
+            progress_callback(f"shuffling {band * 10}%–{(band + 1) * 10}%")
+
     try:
-        for chunk_index in range(10):
-            low=chunk_index*10; high=low+10
-            if progress_callback is not None: progress_callback(f"shuffling {low}%–{high}%")
-            start=len(entries)*chunk_index//10; end=len(entries)*(chunk_index+1)//10
-            if end>start: scored.extend(playlist_history_scores(entries[start:end]))
+        scored = playlist_history_scores(entries, progress_callback=report_scoring_progress)
     except sqlite3.Error:
         order=list(entries); random.shuffle(order)
         if progress_callback is not None: progress_callback("historical shuffling done")
@@ -15384,111 +16459,58 @@ def playlist_source_signature(playlist_path: Path) -> tuple[int, int] | None:
         return None
 
 
-def rotate_playlist_queue_after_play(order: list[Path], played_track: Path) -> list[Path]:
-    """Move one physical departed track to the tail and collapse path aliases.
+def _playlist_slot_index(order: list[Path], track: Path) -> int:
+    """Find one queue slot for track, preferring exact lexical spelling; never collapse duplicates."""
+    key = lexical_path_key(track)
+    for index, entry in enumerate(order):
+        if lexical_path_key(entry) == key:
+            return index
+    for index, entry in enumerate(order):
+        if same_audio_file_identity(entry, track):
+            return index
+    return -1
 
-    A stale cache may contain multiple spellings of the same underlying file.
-    Remove *all* physical aliases of the departed track and append one canonical
-    representative so the cache self-heals instead of perpetuating an immediate
-    same-song repeat.
-    """
-    before: list[Path] = []
-    matched: Path | None = None
-    for entry in order:
-        if same_audio_file_identity(entry, played_track):
-            if matched is None:
-                matched = entry
-            continue
-        before.append(entry)
-    before.append(matched if matched is not None else played_track)
-    return before
+
+def rotate_playlist_queue_after_play(order: list[Path], played_track: Path) -> list[Path]:
+    """Move exactly one departed playlist slot to the tail; queue length is invariant."""
+    result = list(order)
+    if not result:
+        return result
+    index = _playlist_slot_index(result, Path(played_track))
+    if index < 0:
+        return result
+    slot = result.pop(index)
+    result.append(slot)
+    return result
 
 
 def rotate_playlist_queue_to_front(order: list[Path], track: Path) -> list[Path]:
-    """Rotate an existing queue so the physical *track* is first, deduplicating aliases."""
-    if not order:
-        return []
-    matched_index: int | None = None
-    for index, entry in enumerate(order):
-        if same_audio_file_identity(entry, track):
-            matched_index = index
-            break
-    if matched_index is None:
-        return list(order)
-    rotated = list(order[matched_index:]) + list(order[:matched_index])
-    representative = rotated[0]
-    return [representative] + [
-        entry for entry in rotated[1:]
-        if not same_audio_file_identity(entry, track)
-    ]
+    """Rotate an N-slot queue around exactly one matching slot, preserving duplicate slots."""
+    result = list(order)
+    index = _playlist_slot_index(result, Path(track))
+    if index < 0:
+        return result
+    return result[index:] + result[:index]
 
 
-def move_playlist_track_to_front_preserving_order(
-    order: list[Path],
-    track: Path,
-) -> list[Path]:
-    """Promote one physical track without rotating the rest of a fresh queue.
-
-    This is intentionally NOT ``rotate_playlist_queue_to_front``. A newly built
-    history-ranked queue has meaningful global ordering: NEVER tracks first,
-    followed by increasingly recent plays. Circularly rotating that queue around
-    the currently-playing track moves everything *after* the current track ahead
-    of the NEVER/old material and destroys the history priority.
-
-    If the current physical file is present, remove all aliases of it, put one
-    representative at index 0, and leave every other entry in its original
-    relative order. If it is no longer in the reloaded playlist, leave the fresh
-    queue untouched so its first history-ranked entry becomes the next track.
-    """
-    if not order:
-        return []
-
-    representative: Path | None = None
-    remainder: list[Path] = []
-    for entry in order:
-        if same_audio_file_identity(entry, track):
-            if representative is None:
-                representative = entry
-            continue
-        remainder.append(entry)
-
-    if representative is None:
-        return list(order)
-    return [representative] + remainder
+def move_playlist_track_to_front_preserving_order(order: list[Path], track: Path) -> list[Path]:
+    """Promote exactly one matching slot while preserving every other slot and its order."""
+    result = list(order)
+    index = _playlist_slot_index(result, Path(track))
+    if index < 0:
+        return result
+    slot = result.pop(index)
+    return [slot] + result
 
 
 def playlist_resume_successor(order: list[Path], current_track: Path) -> Path | None:
-    """Capture the distinct queue successor intended for a resumed track.
-
-    Motivation: resume is special because PAFPlayer re-anchors/rotates the
-    persistent shuffle queue before the restored track plays, then rotates the
-    departed track again on transition.  That double transformation made the
-    first forward action after resume vulnerable to selecting the restored file
-    again.  Capture the successor from the queue *before* those mutations and
-    consume it exactly once when leaving the resumed visit.
-    """
-    if not order:
-        return None
-    matching_indexes = [
-        index for index, entry in enumerate(order)
-        if same_audio_file_identity(entry, current_track)
-    ]
-    if matching_indexes:
-        # Use the first occurrence as the queue anchor, but skip every duplicate
-        # representation of the current file while walking forward.
-        start = matching_indexes[0]
-        for step in range(1, len(order) + 1):
-            candidate = order[(start + step) % len(order)]
-            if candidate.is_file() and not same_audio_file_identity(candidate, current_track):
-                return candidate
-    else:
-        # A resume bookmark may point at a track newly added to/recovered from a
-        # playlist whose cached order predates it.  In that case the queue head
-        # is the natural next candidate, provided it is genuinely different.
-        for candidate in order:
-            if candidate.is_file() and not same_audio_file_identity(candidate, current_track):
-                return candidate
-    return None
+    """Return the literal next queue slot; duplicate physical files are legitimate entries."""
+    if len(order) < 2:
+        return Path(order[0]) if order else None
+    index = _playlist_slot_index(list(order), Path(current_track))
+    if index < 0:
+        return Path(order[0])
+    return Path(order[(index + 1) % len(order)])
 
 
 def same_audio_file_identity_strict(
@@ -15497,11 +16519,9 @@ def same_audio_file_identity_strict(
 ) -> bool:
     """Return physical identity without the basename shortcut used by bulk queue code.
 
-    Motivation: the normal identity helper avoids samefile() when basenames differ
-    because it may run thousands of times.  The final forward-launch guard compares
-    only a handful of candidates and has a stronger correctness contract: *never*
-    relaunch the physical file just heard.  Here an unconditional samefile() fallback
-    is therefore appropriate and also catches hardlinks/aliases with different names.
+    Legacy diagnostic identity helper retained for historical anti-repeat tests.
+    V309+ live playlist playback intentionally does not call this function because
+    duplicate physical files can represent distinct literal playlist slots.
     """
     if lexical_path_key(left) == lexical_path_key(right):
         return True
@@ -15516,7 +16536,11 @@ def force_distinct_forward_playlist_candidate(
     previous_track: Path,
     proposed_track: Path,
 ) -> Path:
-    """Guarantee that a forward transition cannot relaunch the just-played physical file.
+    """LEGACY V89 diagnostic helper; V309 live playlist playback must not call this.
+
+    Historically this guaranteed that a forward transition could not relaunch the
+    just-played physical file. Under V309's literal-slot queue contract, duplicate
+    slots are intentional and this behavior would be destructive if used live.
 
     Motivation: resume + background historical shuffling has accumulated several
     layers of queue/history protection, but the user has still observed `>` landing
@@ -15577,27 +16601,18 @@ def force_distinct_forward_playlist_candidate(
 def playlist_queue_neighbor_distinct(
     order: list[Path], current_track: Path, direction: int
 ) -> Path | None:
-    """Return the next existing queue entry that is a different physical file."""
+    """Return the literal adjacent existing queue slot, even if it names the same physical file."""
     if not order:
         return None
-    try:
-        index = next(
-            i for i, entry in enumerate(order)
-            if same_audio_file_identity(entry, current_track)
-        )
-    except StopIteration:
-        index = -1
-    same_track_fallback: Path | None = None
-    step_direction = -1 if direction < 0 else 1
-    for step in range(1, len(order) + 1):
-        candidate = order[(index + step_direction * step) % len(order)]
-        if not candidate.is_file():
-            continue
-        if same_audio_file_identity(candidate, current_track):
-            same_track_fallback = candidate
-            continue
-        return candidate
-    return same_track_fallback
+    step = -1 if direction < 0 else 1
+    index = _playlist_slot_index(list(order), Path(current_track))
+    if index < 0:
+        index = 0 if step < 0 else -1
+    for distance in range(1, len(order) + 1):
+        candidate = Path(order[(index + step * distance) % len(order)])
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def audio_navigation_root(directory: Path) -> Path:
@@ -15614,7 +16629,7 @@ def advance_playlist_visit_history(
     result: str,
     queue_neighbor,
 ) -> tuple[Path, int]:
-    """Move through actual visit history; forward navigation never repeats current path."""
+    """Navigate visit history while preserving literal playlist-slot semantics."""
     if not history:
         first = queue_neighbor(0)
         history.append(first)
@@ -15627,23 +16642,11 @@ def advance_playlist_visit_history(
         history.insert(0, previous_track)
         return previous_track, 0
     if result in {NEXT_FILE, "completed"} and cursor + 1 < len(history):
-        current_track = history[cursor]
-        # Visit history may contain path aliases for the same physical file from
-        # earlier caches/resume transitions. Skip all of them on forward motion.
-        for future_cursor in range(cursor + 1, len(history)):
-            if not same_audio_file_identity(history[future_cursor], current_track):
-                return history[future_cursor], future_cursor
-        del history[cursor + 1:]
+        cursor += 1
+        return history[cursor], cursor
     next_track = queue_neighbor(1)
     if cursor + 1 < len(history):
         del history[cursor + 1:]
-    # queue_neighbor is expected to be distinct whenever the playlist contains
-    # another playable path. Do not silently manufacture a duplicate history
-    # entry if an implementation regresses.
-    if history and same_audio_file_identity(next_track, history[cursor]):
-        alternate = queue_neighbor(1)
-        if not same_audio_file_identity(alternate, history[cursor]):
-            next_track = alternate
     history.append(next_track)
     return next_track, len(history) - 1
 
@@ -17223,12 +18226,44 @@ ANSI_CSI_RE = re.compile(
 )
 
 
-CIRCLED_NUMBER_GLYPHS = "⓿①②③④⑤⑥⑦⑧⑨❶❷❸❹❺❻❼❽❾❿"
+# Ordinary enclosed numbers continue through 50.  The bold/negative family
+# (❶–❿) is a separate Unicode series and stops at ten.
+CIRCLED_NUMBER_GLYPHS = "⓿①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳㉑㉒㉓㉔㉕㉖㉗㉘㉙㉚㉛㉜㉝㉞㉟㊱㊲㊳㊴㊵㊶㊷㊸㊹㊺㊻㊼㊽㊾㊿❶❷❸❹❺❻❼❽❾❿"
+WINDOWS_TERMINAL_SPACED_EMOJIMAX_GLYPHS = "❶❷❸❹❺❻❼❽❾"
+
+
+def windows_terminal_emojimax_spacing_enabled() -> bool:
+    """Return whether this console is hosted by Windows Terminal.
+
+    Windows Terminal paints the negative circled digits wider than the cell
+    advance it reports.  The bugfix is intentionally not enabled for web/Tk,
+    redirected output, other terminals, or literal circled digits in lyrics.
+    """
+    return os.name == "nt" and bool(os.environ.get("WT_SESSION")) and bool(getattr(sys.stdout, "isatty", lambda: False)())
+
+
+def windows_terminal_emojimax_replacement(replacement: str) -> str:
+    """Add one terminal-only safety cell after generated ❶-❾ substitutions."""
+    return re.sub(
+        rf"([{re.escape(WINDOWS_TERMINAL_SPACED_EMOJIMAX_GLYPHS)}])",
+        lambda match: match.group(1) + " ",
+        str(replacement),
+    )
 
 
 def compensate_current_circled_number_spacing(text: str) -> str:
-    """V295/v292 salvage: keep lyric geometry identical across upcoming/current/previous states."""
-    return str(text)
+    """Keep a sung double-height circled number visibly separated from its word.
+
+    Windows Terminal's DECDHL rendering can consume the ordinary two logical
+    Emojimaxx spaces after a circled digit, making ``❶word`` look glued together.
+    The current/sung line alone gets one additional logical space; neighboring
+    lyric lines retain their cursor-based compensation and normal geometry.
+    """
+    return re.sub(
+        rf"([{re.escape(CIRCLED_NUMBER_GLYPHS)}])\s+(?=\S)",
+        lambda match: match.group(1) + "   ",
+        str(text),
+    )
 
 
 def compensate_neighbor_circled_one_advance(plain_text: str, colored_text: str) -> str:
@@ -17377,6 +18412,24 @@ def center_to_cells(text: str, width: int) -> str:
     remaining = max(0, width - terminal_cell_width(text))
     left = remaining // 2
     return " " * left + text + " " * (remaining - left)
+
+
+def interaction_feedback_box_rows(text: str, visualizer_width: int) -> tuple[str, str, str]:
+    """Build a three-row overlay whose borders occupy identical terminal cells."""
+    visualizer_width = max(12, int(visualizer_width))
+    maximum_text_cells = max(8, visualizer_width - 4)
+    fitted_text = truncate_to_cells(str(text), maximum_text_cells)
+    inner_width = min(
+        max(10, terminal_cell_width(fitted_text) + 2),
+        max(10, visualizer_width - 2),
+    )
+    fitted_text = truncate_to_cells(fitted_text, inner_width)
+    text_line = center_to_cells(fitted_text, inner_width)
+    return (
+        f"┌{'─' * inner_width}┐",
+        f"│{text_line}│",
+        f"└{'─' * inner_width}┘",
+    )
 
 
 def wrap_to_cells(text: str, width: int) -> list[str]:
@@ -17953,8 +19006,9 @@ def normalize_attribute_tokens(values: object) -> list[str]:
     mandatory ``learned`` tag.  attrib.lst rules use commas as separators, so
     individual tokens must never carry commas/newlines/colons into the rule
     syntax.  Lower-casing and case-insensitive de-duplication keep accidental
-    repeats like ``Best,best`` from producing ambiguous state while still
-    allowing simple hyphen/underscore/space-free Claire ecosystem attributes.
+    repeats like ``Best,best`` from producing ambiguous state. Internal spaces
+    are preserved exactly as ordinary attribute text (``pretty good`` must not
+    become ``pretty-good``).
     """
 
     if values is None:
@@ -17971,9 +19025,9 @@ def normalize_attribute_tokens(values: object) -> list[str]:
     seen: set[str] = set()
     for raw in raw_values:
         token = str(raw or "").strip().casefold()
-        token = re.sub(r"\s+", "-", token)
+        token = re.sub(r"\s+", " ", token)
         token = token.replace(",", "").replace(":", "").replace("\r", "").replace("\n", "")
-        token = re.sub(r"[^a-z0-9_.+\-]", "", token)
+        token = re.sub(r"[^a-z0-9_.+\- ]", "", token)
         if not token or token in seen:
             continue
         seen.add(token)
@@ -18209,6 +19263,81 @@ def learned_confirmation_lines(
         truncate_to_cells(second, available),
     ]
 
+
+
+# V309: faithful Python port of Claire's DeCensor.pm production routine.
+# It is intentionally display-only here.  A line without '*' bypasses all regex work.
+DECENSOR_FOUR_LETTER_WORDS = ("fuck", "shit", "cunt", "cock", "piss", "twat", "dick", "crap")
+DECENSOR_FIVE_LETTER_WORDS = ("fucks", "bitch", "shits", "cunts", "cocks", "twats", "twats", "dicks", "craps", "prick", "pissy", "skank", "booty")
+_DECENSOR_FIVE_MASK_ORDER = (
+    (0,), (1,), (2,), (3,), (4,),
+    (0,1), (0,2), (0,3), (0,4), (1,2), (1,3), (1,4), (2,3), (2,4), (3,4),
+    (0,1,2), (0,1,3), (0,1,4), (1,2,3), (1,2,4), (1,3,4), (2,3,4),
+    (0,1,2,3), (0,1,2,4), (0,1,3,4), (0,2,3,4), (1,2,3,4),
+)
+_DECENSOR_FOUR_MASK_ORDER = (
+    (1,2,3), (0,2,3), (0,1,3), (0,1,2),
+    (0,1), (0,2), (0,3), (1,2), (1,3), (2,3),
+    (0,), (1,), (2,), (3,),
+)
+
+def _build_decensor_rules(words: tuple[str, ...], mask_order: tuple[tuple[int, ...], ...]):
+    rules = []
+    for word in words:
+        for masked_tuple in mask_order:
+            masked = frozenset(masked_tuple)
+            pieces = []
+            for index, character in enumerate(word):
+                pieces.append(r"(\*)" if index in masked else f"({re.escape(character)})")
+            pattern = re.compile(r"(?:^|\b)" + "".join(pieces), re.IGNORECASE)
+            def replace(match, *, target=word, hidden=masked):
+                return "".join(
+                    target[index] if index in hidden else match.group(index + 1)
+                    for index in range(len(target))
+                )
+            rules.append((pattern, replace))
+    return tuple(rules)
+
+_DECENSOR_RULES = (
+    _build_decensor_rules(DECENSOR_FIVE_LETTER_WORDS, _DECENSOR_FIVE_MASK_ORDER)
+    + _build_decensor_rules(DECENSOR_FOUR_LETTER_WORDS, _DECENSOR_FOUR_MASK_ORDER)
+)
+
+@lru_cache(maxsize=8192)
+def de_censor_production(text: str) -> str:
+    """Restore the exact asterisk masks recognized by DeCensor.pm, in the same order."""
+    value = str(text or "")
+    if "*" not in value:
+        return value
+    for pattern, replace in _DECENSOR_RULES:
+        value = pattern.sub(replace, value)
+    return value
+
+
+def decensor_lyric_line(text: str, enabled: bool = True) -> str:
+    """Cheap display transform: only asterisk-bearing lines enter the DeCensor matcher."""
+    value = str(text or "")
+    return de_censor_production(value) if enabled and "*" in value else value
+
+
+def decensor_karaoke_frame(frame: "KaraokeFrame", enabled: bool) -> "KaraokeFrame":
+    """Return the same timing frame with only its visible text fields de-censored."""
+    if not enabled or not any("*" in value for value in (frame.active_text, frame.title_text, frame.previous_text, frame.next_text)):
+        return frame
+    return KaraokeFrame(
+        position=frame.position,
+        active_index=frame.active_index,
+        active_text=decensor_lyric_line(frame.active_text),
+        active_opacity=frame.active_opacity,
+        emphasis_progress=frame.emphasis_progress,
+        title_text=decensor_lyric_line(frame.title_text),
+        previous_index=frame.previous_index,
+        previous_text=decensor_lyric_line(frame.previous_text),
+        previous_brightness=frame.previous_brightness,
+        next_index=frame.next_index,
+        next_text=decensor_lyric_line(frame.next_text),
+        next_brightness=frame.next_brightness,
+    )
 
 def _normalize_lyrics_for_tag(text: str) -> str:
     return str(text or "").replace("\r\n", "\n").replace("\r", "\n").rstrip("\n")
@@ -19860,14 +20989,14 @@ def format_tag_panel(
     ):
         if field is not None:
             sequence.append(field)
-    if original_artist:
-        sequence.append(("Original artist", original_artist, "normal"))
-    if composer:
-        sequence.append(("Composer", composer, "normal"))
     if comment:
         sequence.append(("Comment", comment, "comment"))
     if url:
         sequence.append(("URL", url, "url"))
+    if original_artist:
+        sequence.append(("Original artist", original_artist, "normal"))
+    if composer:
+        sequence.append(("Composer", composer, "normal"))
 
     def render_smart_two_row_layout() -> list[tuple[str, str]] | None:
         """Optimize complete two-row metadata before falling back to wrapping.
@@ -19879,7 +21008,7 @@ def format_tag_panel(
         if not smart_alignment_enabled or len(sequence) < 2:
             return None
         dense_cells = (
-            sum(len(label) + 2 + terminal_cell_width(value) for label, value, _kind in sequence)
+            sum(len(label) + 2 + terminal_cell_width(value.rstrip()) for label, value, _kind in sequence)
             + HUD_LAYOUT_GAP_CELLS * max(0, len(sequence) - 1)
         )
         if dense_cells <= width:
@@ -19892,19 +21021,19 @@ def format_tag_panel(
             "Song": (1, 0, 0),
             "Genre": (1, 1, 1),
             "Album": (2, 0, 0),
-            "Original artist": (2, 1, 1),
-            "Last play": (2, 1, 2),
-            "Comment": (2, 1, 3),  # V263: share Album lane; prefer opposite row so their colons can align.
+            "Comment": (2, 1, 1),  # Share Album lane; keep Comment before attribution/composer tails.
+            "Original artist": (2, 1, 2),
+            "Last play": (2, 1, 3),
             "Composer": (3, 1, 1),
             "URL": (4, 1, 0),
         }
-        field_map = {label: (label, value, kind) for label, value, kind in sequence}
+        field_map = {label: (label, value.rstrip(), kind) for label, value, kind in sequence}
         specs: list[tuple[str, int, int, int, int]] = []
         for label, value, _kind in sequence:
             lane, preferred_row, order = semantic_meta.get(label, (9, 1, 0))
             specs.append((
                 label,
-                len(label) + 2 + terminal_cell_width(value),
+                len(label) + 2 + terminal_cell_width(value.rstrip()),
                 lane,
                 preferred_row,
                 order,
@@ -19928,6 +21057,30 @@ def format_tag_panel(
         for positioned_fields in geometry:
             if not positioned_fields:
                 continue
+            # V319: when the second HUD row has the natural
+            # Genre / Comment / Composer tail, Composer owns the right edge and
+            # Comment sits midway between it and Genre.  The general optimizer
+            # previously treated Composer as just another lane, leaving a large
+            # and visually pointless blank suffix on wide terminals.
+            positioned_fields = list(positioned_fields)
+            positioned_labels = [label for label, _start in positioned_fields]
+            if all(label in positioned_labels for label in ("Genre", "Comment", "Composer")):
+                genre_index = positioned_labels.index("Genre")
+                comment_index = positioned_labels.index("Comment")
+                composer_index = positioned_labels.index("Composer")
+                if genre_index < comment_index < composer_index:
+                    genre_label, genre_value, _ = field_map["Genre"]
+                    comment_label, comment_value, _ = field_map["Comment"]
+                    composer_label, composer_value, _ = field_map["Composer"]
+                    genre_end = int(positioned_fields[genre_index][1]) + len(genre_label) + 2 + terminal_cell_width(genre_value.rstrip())
+                    comment_cells = len(comment_label) + 2 + terminal_cell_width(comment_value)
+                    composer_cells = len(composer_label) + 2 + terminal_cell_width(composer_value)
+                    composer_start = width - composer_cells
+                    shared_space = composer_start - genre_end - comment_cells
+                    if shared_space >= 4:
+                        left_gap = shared_space // 2
+                        positioned_fields[comment_index] = ("Comment", genre_end + left_gap)
+                        positioned_fields[composer_index] = ("Composer", composer_start)
             plain = ""
             ansi = ""
             visible = 0
@@ -19951,9 +21104,8 @@ def format_tag_panel(
             rendered.append((plain.rstrip(), ansi.rstrip()))
         return rendered if rendered else None
 
+    # Delay the return until the final anchoring pass is available below.
     smart_rows = render_smart_two_row_layout()
-    if smart_rows is not None:
-        return tuple(item[0] for item in smart_rows), tuple(item[1] for item in smart_rows)
 
     def dedupe_metadata_rows(
         rendered_rows: list[tuple[str, str]],
@@ -20071,6 +21223,209 @@ def format_tag_panel(
         if not inserted:
             result.append(" " * count)
         return "".join(result)
+
+    def finalize_hud_layout_rows(
+        rendered_rows: list[tuple[str, str]],
+    ) -> list[tuple[str, str]]:
+        """Apply the HUD's final, non-negotiable layout priorities.
+
+        Packing decides which fields belong on each row; this pass never changes
+        that membership, wraps a value, or creates a row. Ordinary metadata rows
+        retain their natural left-to-right geometry. Only intentional right-side
+        tail fields may own the right edge; otherwise a wide terminal would turn
+        every row into a needlessly right-justified cluster.
+        """
+        if not rendered_rows:
+            return rendered_rows
+
+        field_map: dict[str, Field] = {
+            label: (label, value.rstrip(), kind)
+            for label, value, kind in sequence
+        }
+        if not field_map:
+            return rendered_rows
+
+        positioned: list[list[tuple[str, int]]] = []
+        eligible: list[bool] = []
+        for plain, _ansi in rendered_rows:
+            fields = [(label, int(start)) for label, start, _colon in metadata_field_positions(plain)]
+            good = bool(fields) and all(label in field_map for label, _start in fields)
+            positioned.append(fields)
+            eligible.append(good)
+
+        def field_cells(label: str) -> int:
+            _label, value, _kind = field_map[label]
+            return len(label) + 2 + terminal_cell_width(value)
+
+        # Priority 1 after packing: the final field owns the right edge, but the
+        # earlier fields do *not* move with it. This uses a row's spare width as
+        # a real inter-field gap instead of turning every row into a right-side
+        # cluster. Later column alignment may still move interior fields left.
+        for row_index, fields in enumerate(positioned):
+            if not eligible[row_index]:
+                continue
+            last_label, last_start = fields[-1]
+            desired_last_start = max(0, width - field_cells(last_label))
+            if len(fields) == 1:
+                fields[-1] = (last_label, desired_last_start)
+                continue
+            previous_label, previous_start = fields[-2]
+            minimum_last_start = previous_start + field_cells(previous_label) + HUD_LAYOUT_GAP_CELLS
+            if desired_last_start >= minimum_last_start:
+                fields[-1] = (last_label, desired_last_start)
+
+        # When a primary row has a left and right anchor, the musical datum in
+        # between should use the middle of that real estate.  Song and Genre are
+        # the two scan targets; centering them gives equal whitespace on both
+        # sides without moving an anchor or sacrificing another field.
+        for fields in positioned:
+            for centered_label, left_label, right_labels in (
+                ("Song", "Act", {"Album", "Last play", "Original artist", "Composer", "Comment", "URL"}),
+                ("Genre", "Year", {"Comment", "Album", "Last play", "Original artist", "Composer", "URL"}),
+            ):
+                labels = [label for label, _start in fields]
+                if centered_label not in labels or left_label not in labels:
+                    continue
+                center_index = labels.index(centered_label)
+                left_index = labels.index(left_label)
+                if left_index >= center_index or center_index + 1 >= len(fields):
+                    continue
+                right_index = next(
+                    (index for index in range(center_index + 1, len(fields)) if fields[index][0] in right_labels),
+                    None,
+                )
+                if right_index is None:
+                    continue
+                left_start = fields[left_index][1]
+                left_end = left_start + field_cells(left_label)
+                right_start = fields[right_index][1]
+                candidate = left_end + max(2, (right_start - left_end - field_cells(centered_label)) // 2)
+                if candidate + field_cells(centered_label) + HUD_LAYOUT_GAP_CELLS <= right_start:
+                    fields[center_index] = (centered_label, candidate)
+
+        def align_label_to_reference(label: str, references: tuple[str, ...]) -> None:
+            """Align a label colon to an existing column without creating overlap."""
+            reference_stops = [
+                start + len(candidate)
+                for fields in positioned
+                for candidate, start in fields
+                if candidate in references
+            ]
+            if not reference_stops:
+                return
+            target_stop = reference_stops[0]
+            for fields in positioned:
+                labels = [candidate for candidate, _start in fields]
+                if label not in labels:
+                    continue
+                index = labels.index(label)
+                desired = target_stop - len(label)
+                minimum = 0
+                if index:
+                    previous_label, previous_start = fields[index - 1]
+                    minimum = previous_start + field_cells(previous_label) + HUD_LAYOUT_GAP_CELLS
+                maximum = width - field_cells(label)
+                if index + 1 < len(fields):
+                    _next_label, next_start = fields[index + 1]
+                    maximum = next_start - field_cells(label) - HUD_LAYOUT_GAP_CELLS
+                if minimum <= desired <= maximum:
+                    fields[index] = (label, desired)
+
+        # Center Song first, then use its colon as the shared middle column for
+        # Genre. Album/Last play similarly provide the right-side metadata
+        # column for Comment. Both adjustments remain conditional on fitting.
+        align_label_to_reference("Genre", ("Song",))
+        align_label_to_reference("Comment", ("Album", "Last play"))
+
+        def colon_locations() -> dict[str, list[tuple[int, int]]]:
+            found: dict[str, list[tuple[int, int]]] = {}
+            for row_index, fields in enumerate(positioned):
+                if not eligible[row_index]:
+                    continue
+                for label, start in fields:
+                    found.setdefault(label, []).append((row_index, start + len(label)))
+            return found
+
+        # Priority 2: align meaningful, visually right-side colons *only* when
+        # the target is inside the field's already-available gap.  In particular
+        # this lets Comment share Album/Last play's column without stealing a
+        # character from Composer or making another HUD line.
+        alignment_preferences = (
+            ("Comment", ("Album", "Last play")),
+            ("Original artist", ("Album", "Last play", "Comment")),
+            ("URL", ("Album", "Last play", "Comment")),
+            ("Year", ("Act",)),
+        )
+        for label, references in alignment_preferences:
+            locations = colon_locations()
+            reference_stops = [
+                stop
+                for reference in references
+                for reference_row, stop in locations.get(reference, ())
+                if reference != label
+            ]
+            if not reference_stops:
+                continue
+            for row_index, fields in enumerate(positioned):
+                if not eligible[row_index]:
+                    continue
+                try:
+                    field_index = next(index for index, (candidate, _start) in enumerate(fields) if candidate == label)
+                except StopIteration:
+                    continue
+                # The last field owns the right edge; moving it would violate the
+                # primary rule.  Earlier fields can move inside their two gaps.
+                if field_index == len(fields) - 1:
+                    continue
+                _candidate, current_start = fields[field_index]
+                minimum = 0
+                if field_index:
+                    previous_label, previous_start = fields[field_index - 1]
+                    minimum = previous_start + field_cells(previous_label) + HUD_LAYOUT_GAP_CELLS
+                next_label, next_start = fields[field_index + 1]
+                maximum = next_start - field_cells(label) - HUD_LAYOUT_GAP_CELLS
+                viable = [
+                    stop - len(label)
+                    for stop in reference_stops
+                    if minimum <= stop - len(label) <= maximum
+                ]
+                if not viable:
+                    continue
+                desired_start = min(viable, key=lambda value: (abs(value - current_start), value))
+                fields[field_index] = (label, desired_start)
+
+        output: list[tuple[str, str]] = []
+        for (plain, ansi), fields, good in zip(rendered_rows, positioned, eligible):
+            if not good:
+                output.append((plain, ansi))
+                continue
+            rebuilt_plain = ""
+            rebuilt_ansi = ""
+            visible = 0
+            valid = True
+            for label, start in fields:
+                if start < visible:
+                    valid = False
+                    break
+                _label, value, kind = field_map[label]
+                padding = " " * (start - visible)
+                label_plain = f"{label}: "
+                label_ansi = f"\033[2;90m{label}:\033[0m "
+                rebuilt_plain += padding + label_plain + value
+                rebuilt_ansi += padding + label_ansi + ansi_value(
+                    kind, value,
+                    hyperlink_target=value if kind == "url" else None,
+                )
+                visible = start + terminal_cell_width(label_plain) + terminal_cell_width(value)
+            if not valid or visible > width:
+                output.append((plain, ansi))
+            else:
+                output.append((rebuilt_plain.rstrip(), rebuilt_ansi.rstrip()))
+        return output
+
+    if smart_rows is not None:
+        smart_rows = finalize_hud_layout_rows(smart_rows)
+        return tuple(item[0] for item in smart_rows), tuple(item[1] for item in smart_rows)
 
     def justify_greedy_rows(
         rendered_rows: list[tuple[str, str]],
@@ -20269,6 +21624,7 @@ def format_tag_panel(
             current_colons = []
 
         for label, value, kind in sequence:
+            value = value.rstrip()
             # Natural label width is the densest legal representation.
             label_plain = f"{label}: "
             label_ansi = f"\033[2;90m{label}:\033[0m "
@@ -20292,22 +21648,10 @@ def format_tag_panel(
 
             separator = "" if not current_plain else dense_gap
 
-            # Soft alignment: only spend extra spaces if the aligned form still
-            # fits on this same line.  Otherwise immediately break the grid.
-            if current_plain and known_colon_stops:
-                current_width = terminal_cell_width(current_plain)
-                minimal_colon = current_width + dense_gap_cells + len(label)
-                future_stops = [stop for stop in known_colon_stops if stop >= minimal_colon]
-                if future_stops:
-                    target_colon = future_stops[0]
-                    aligned_spaces = max(
-                        dense_gap_cells,
-                        target_colon - current_width - len(label),
-                    )
-                    aligned_separator = " " * aligned_spaces
-                    aligned_candidate = current_plain + aligned_separator + chunk_plain
-                    if terminal_cell_width(aligned_candidate) <= width:
-                        separator = aligned_separator
+            # V327: packing must finish before alignment.  The former look-back
+            # padding could make the current field fit while silently consuming
+            # the cells needed by a later Composer, thereby creating a needless
+            # extra row.  The final geometry pass below now owns all alignment.
 
             candidate = current_plain + separator + chunk_plain
             if terminal_cell_width(candidate) <= width:
@@ -20518,11 +21862,12 @@ def format_tag_panel(
         return result
 
     dense_one_row_cells = (
-        sum(len(label) + 2 + terminal_cell_width(value) for label, value, _kind in sequence)
+        sum(len(label) + 2 + terminal_cell_width(value.rstrip()) for label, value, _kind in sequence)
         + 2 * max(0, len(sequence) - 1)
     )
     if sequence and dense_one_row_cells <= width:
         greedy_rows = dedupe_metadata_rows(rebalance_greedy_rows(render_greedy()))
+        greedy_rows = finalize_hud_layout_rows(greedy_rows)
         return tuple(item[0] for item in greedy_rows), tuple(item[1] for item in greedy_rows)
 
     # Width is per semantic column rather than global.  This is what makes
@@ -20624,6 +21969,7 @@ def format_tag_panel(
                 rows.append(render_grid_row(row))
     else:
         greedy_rows = dedupe_metadata_rows(rebalance_greedy_rows(render_greedy()))
+        greedy_rows = finalize_hud_layout_rows(greedy_rows)
         return tuple(item[0] for item in greedy_rows), tuple(item[1] for item in greedy_rows)
 
     # Tails are not entitled to their own physical rows.  First try every
@@ -20665,6 +22011,7 @@ def format_tag_panel(
             rows.extend(render_single(field, prior_rows=rows))
 
     rows = dedupe_metadata_rows(rows)
+    rows = finalize_hud_layout_rows(rows)
     return tuple(item[0] for item in rows), tuple(item[1] for item in rows)
 
 
@@ -21106,25 +22453,68 @@ def is_majority_play_eligible(
 
 
 def is_local_history_eligible(
-    duration: float | None, ranges: list[tuple[float, float]],
+    duration: float | None,
+    ranges: list[tuple[float, float]],
+    *,
+    full_play_completion: bool = False,
 ) -> bool:
     """Return True at one-third of the unique track timeline for local Last play.
 
     Local history is intentionally earned earlier than a Last.fm scrobble.  The
     same merged-range accounting prevents repeated seeks over one section from
     manufacturing progress, while ``>= duration / 3`` writes at the requested
-    33% point rather than waiting for track completion.
+    33% point rather than waiting for track completion.  A clean natural EOF is
+    also conclusive local-history evidence: malformed MP3 duration headers or
+    an attached-art stream can substantially overstate the playable audio span.
+    Last.fm has its own narrower override only for a verified complete playable
+    stream of 30 seconds or less.
     """
+    if full_play_completion:
+        return True
     if duration is None or duration <= 0:
         return False
     listened = sum(max(0.0, end - start) for start, end in merged_playback_ranges(ranges))
     return listened >= duration / 3.0
 
 
-def is_lastfm_scrobble_eligible(
-    duration: float | None, ranges: list[tuple[float, float]],
+SHORT_TRACK_FULL_PLAY_MAX_SECONDS = 30.0
+FULL_PLAY_START_TOLERANCE_SECONDS = 0.25
+
+
+def playback_ranges_cover_from_start(
+    ranges: list[tuple[float, float]], playback_start: float,
 ) -> bool:
-    """Keep Last.fm on the strict more-than-50% majority-play rule."""
+    """Return whether one continuous listened span begins at the intended start."""
+    merged = merged_playback_ranges(ranges)
+    return bool(
+        len(merged) == 1
+        and merged[0][1] > merged[0][0]
+        and merged[0][0] <= float(playback_start) + FULL_PLAY_START_TOLERANCE_SECONDS
+    )
+
+
+def is_short_track_full_play(
+    ranges: list[tuple[float, float]],
+    *,
+    natural_completion: bool,
+    playback_start: float,
+) -> bool:
+    """Recognize a complete short playable stream even when container time lies."""
+    if not natural_completion or not playback_ranges_cover_from_start(ranges, playback_start):
+        return False
+    listened = sum(max(0.0, end - start) for start, end in merged_playback_ranges(ranges))
+    return 0.0 < listened <= SHORT_TRACK_FULL_PLAY_MAX_SECONDS
+
+
+def is_lastfm_scrobble_eligible(
+    duration: float | None,
+    ranges: list[tuple[float, float]],
+    *,
+    short_full_play: bool = False,
+) -> bool:
+    """Use majority play normally, but always accept a fully played short stream."""
+    if short_full_play:
+        return True
     return is_majority_play_eligible(duration, ranges)
 
 
@@ -21233,11 +22623,17 @@ def scrobble_track_async(
     ranges: list[tuple[float, float]], started_at: int,
     status_callback=None,
     force: bool = False,
+    short_full_play: bool = False,
 ) -> bool:
     """Submit an eligible scrobble without letting network/auth block playback."""
     artist = tags.get("Artist", "").strip()
     title = tags.get("Song", "").strip()
-    if not artist or not title or (not force and not is_lastfm_scrobble_eligible(duration, ranges)):
+    if not artist or not title or (
+        not force
+        and not is_lastfm_scrobble_eligible(
+            duration, ranges, short_full_play=short_full_play,
+        )
+    ):
         if status_callback:
             status_callback("scrobble failed")
         return False
@@ -21284,7 +22680,7 @@ def update_lastfm_now_playing_async(
     the track and later returning creates a new visit and sends a fresh update.
 
     Motivation: Last.fm's web UI can show "Now Playing" immediately, matching
-    Winamp-style behavior, without falsely adding short/skipped tracks to history.
+    Winamp-style behavior, without falsely adding skipped tracks to history.
     Network/auth failures are logged and reported asynchronously and never block
     or stop audio playback.
     """
@@ -21447,17 +22843,26 @@ def read_windows_key_action() -> str | None:
         for virtual_key, scan_character, action in global_arrow_bindings:
             latch_key = 0xA00 + virtual_key
             key_is_down = _windows_key_down(virtual_key)
+            now_key = time.monotonic()
             if key_is_down and latch_key not in _ASYNC_KEY_LATCH:
                 _ASYNC_KEY_LATCH.add(latch_key)
-                _ASYNC_EXTENDED_SUPPRESS_ONCE[scan_character] = time.monotonic() + 1.0
+                _ASYNC_HELD_ACTION_REPEAT_AT[latch_key] = now_key + 0.32
+                _ASYNC_EXTENDED_SUPPRESS_ONCE[scan_character] = now_key + 1.0
                 return action
+            if key_is_down and action in {VOLUME_UP_5, VOLUME_DOWN_5}:
+                repeat_at = float(_ASYNC_HELD_ACTION_REPEAT_AT.get(latch_key, now_key + 0.32))
+                if now_key >= repeat_at:
+                    _ASYNC_HELD_ACTION_REPEAT_AT[latch_key] = now_key + 0.085
+                    return action
             if not key_is_down:
                 _ASYNC_KEY_LATCH.discard(latch_key)
+                _ASYNC_HELD_ACTION_REPEAT_AT.pop(latch_key, None)
     else:
         # Releasing either modifier ends the chord; no arrow-state probes are
         # needed while Ctrl+Alt is not held.
         for virtual_key, _scan_character, _action in global_arrow_bindings:
             _ASYNC_KEY_LATCH.discard(0xA00 + virtual_key)
+            _ASYNC_HELD_ACTION_REPEAT_AT.pop(0xA00 + virtual_key, None)
 
     # F2/F3 hold-Megamix still needs continuous physical state while held, but it
     # may START only when this console has actually received keyboard input.
@@ -21722,6 +23127,18 @@ def read_windows_key_action() -> str | None:
     if not _windows_key_down(0x73):
         _ASYNC_KEY_LATCH.discard(granularity_latch)
 
+    # V310 Alt+L is the fast learned:Y/N state toggle. It is focus-gated so a
+    # normal Alt+L in another application can never edit attrib.lst.
+    learned_toggle_latch = 0x64C
+    learned_toggle_down = bool(alt_down and not ctrl_down and _windows_key_down(0x4C))
+    if learned_toggle_down and learned_toggle_latch not in _ASYNC_KEY_LATCH and focused_buffered_input:
+        _ASYNC_KEY_LATCH.add(learned_toggle_latch)
+        _ASYNC_CHAR_SUPPRESS_ONCE["l"] = time.monotonic() + 1.0
+        _ASYNC_CHAR_SUPPRESS_ONCE["L"] = time.monotonic() + 1.0
+        return TOGGLE_LEARNED_STATE
+    if not _windows_key_down(0x4C):
+        _ASYNC_KEY_LATCH.discard(learned_toggle_latch)
+
     # Ctrl+Alt+L is deliberately focus-only.  GetAsyncKeyState supplies reliable
     # modifier state, but msvcrt.kbhit() is mandatory evidence that this console
     # was the input target before the learned action can fire.
@@ -21913,7 +23330,16 @@ def detect_edge_silence_bounds(
     if known_duration is not None:
         tail_start = max(0.0, known_duration - safe_scan)
         tail_span = known_duration - tail_start
-        trailing = analyze_window(tail_start, tail_span)
+        # A track no longer than the scan window makes the leading and trailing
+        # requests byte-for-byte identical: both start at zero and decode the
+        # full duration.  V311 launched FFmpeg twice anyway.  Reuse the already
+        # parsed intervals so short clips keep identical bounds at half the
+        # decode/startup cost.
+        trailing = (
+            leading
+            if tail_start == 0.0 and tail_span == leading_scan
+            else analyze_window(tail_start, tail_span)
+        )
         if trailing:
             last_start, last_end = trailing[-1]
             # Require the silence interval to reach the analyzed/file end.
@@ -23805,6 +25231,36 @@ def _ensure_pyaudiowpatch():
             return None
 
 
+@lru_cache(maxsize=32)
+def _live_pcm_fft_geometry(
+    sample_count: int,
+    sample_rate: int,
+    width: int,
+) -> tuple[object, tuple[tuple[int, int], ...], float]:
+    """Cache immutable FFT geometry shared by equal-sized live PCM callbacks."""
+    import numpy as np  # type: ignore
+
+    count = max(1, int(sample_count))
+    rate = max(8000, int(sample_rate))
+    columns = max(12, int(width))
+    window = np.hanning(count).astype(np.float32)
+    window.setflags(write=False)
+    frequencies = np.fft.rfftfreq(count, 1.0 / rate)
+    lo = 35.0
+    hi = min(20000.0, rate * 0.48)
+    edges = np.geomspace(lo, hi, columns + 1)
+    magnitude_count = count // 2 + 1
+    spans: list[tuple[int, int]] = []
+    for index in range(columns):
+        left = int(np.searchsorted(frequencies, edges[index], side="left"))
+        right = int(np.searchsorted(frequencies, edges[index + 1], side="right"))
+        right = max(left + 1, min(right, magnitude_count))
+        left = min(left, magnitude_count - 1)
+        spans.append((left, right))
+    reference = max(1.0, float(count) * 32768.0 * 0.25)
+    return window, tuple(spans), reference
+
+
 def live_pcm_spectrum_levels(
     pcm: bytes,
     *,
@@ -23835,21 +25291,15 @@ def live_pcm_spectrum_levels(
         # A Hann window keeps adjacent live bins from sparkling wildly while the
         # input is quiet. Remove DC because microphone bias otherwise owns bin 1.
         samples = samples - float(samples.mean())
-        samples *= np.hanning(samples.size).astype(np.float32)
+        window, spans, reference = _live_pcm_fft_geometry(samples.size, rate, width)
+        samples *= window
         magnitudes = np.abs(np.fft.rfft(samples))
-        frequencies = np.fft.rfftfreq(samples.size, 1.0 / rate)
         lo = 35.0
         hi = min(20000.0, rate * 0.48)
         if hi <= lo or magnitudes.size < 2:
             return bytes(width)
-        edges = np.geomspace(lo, hi, width + 1)
-        reference = max(1.0, float(samples.size) * 32768.0 * 0.25)
         result = np.zeros(width, dtype=np.uint8)
-        for index in range(width):
-            left = int(np.searchsorted(frequencies, edges[index], side="left"))
-            right = int(np.searchsorted(frequencies, edges[index + 1], side="right"))
-            right = max(left + 1, min(right, magnitudes.size))
-            left = min(left, magnitudes.size - 1)
+        for index, (left, right) in enumerate(spans):
             peak = float(magnitudes[left:right].max(initial=0.0))
             db = 20.0 * math.log10(max(1e-12, peak / reference))
             # -72 dBFS is visually black; roughly -6 dBFS reaches full height.
@@ -23889,6 +25339,18 @@ def live_visualizer_capture_mode(source: int, paused: bool) -> int:
     if value == 4:
         return 3
     return 3 if paused else 0
+
+
+def visualizer_track_artwork_allowed(source: int, paused: bool) -> bool:
+    """Return whether track artwork may participate in the console visualizer.
+
+    Album art describes the file PAFPlayer is decoding.  It becomes misleading
+    as soon as the spectrum comes from Windows loopback and/or a microphone, so
+    live-capture modes suppress every artwork compositor without changing the
+    user's saved cover-art settings.  Auto mode consequently restores artwork
+    when playback resumes and suppresses it while its paused live input is active.
+    """
+    return live_visualizer_capture_mode(source, paused) == 0
 
 
 def combine_live_spectrum_levels(first: bytes, second: bytes, columns: int) -> bytes:
@@ -24975,25 +26437,73 @@ def _art_microtile_quantize_cached(
     return fg, bg, art_microtile_drcs_char(canonical)
 
 
-@lru_cache(maxsize=65536)
+@lru_cache(maxsize=131072)
 def _visualizer_blend_bar_art_cached(
     br: int, bg: int, bb: int, ar: int, ag: int, ab: int, strength_step: int,
+    blend_mode: int = 0,
 ) -> tuple[int, int, int]:
-    """Blend one artwork microtile color over the live bar color at the exact requested strength.
+    """Carry artwork detail into a live bar without needlessly sacrificing bar brightness.
 
-    V244 accidentally treated bar microtiles as artwork-only cells and also forced
-    their artwork strength to at least 15%.  That made a requested 5% cover-art
-    saturation visibly dominate the bars.  Keep the dynamic visualizer color as
-    the base and mix the artwork sample by the same 0..1 strength used by the
-    ordinary bar-color path.
+    Mode 0 is the byte-for-byte legacy linear RGB mix.
+
+    Mode 1 (V305 recommended) uses cover-art *luminance* as detail.  Dark cover
+    pixels make the live palette color more saturated while preserving its peak
+    channel; light cover pixels lift it toward white.  The base bar therefore
+    never loses peak brightness merely because artwork is enabled.  A sqrt
+    response makes low requested strengths such as 5% visibly useful instead of
+    disappearing under a bright moving bar.
+
+    Mode 2 starts with the same luma-detail result, then adds a deliberately
+    smaller amount of the artwork's actual chroma.  It finally restores at least
+    the original bar peak so hybrid color cannot make the bar dimmer than base.
     """
     step = max(0, min(1000, int(strength_step)))
-    inverse = 1000 - step
-    return (
-        max(0, min(255, round((int(br) * inverse + int(ar) * step) / 1000.0))),
-        max(0, min(255, round((int(bg) * inverse + int(ag) * step) / 1000.0))),
-        max(0, min(255, round((int(bb) * inverse + int(ab) * step) / 1000.0))),
+    base = (max(0, min(255, int(br))), max(0, min(255, int(bg))), max(0, min(255, int(bb))))
+    art = (max(0, min(255, int(ar))), max(0, min(255, int(ag))), max(0, min(255, int(ab))))
+    if step <= 0:
+        return base
+    mode = max(0, min(len(ART_COLOR_VISUALIZER_BAR_BLEND_MODES) - 1, int(blend_mode)))
+    if mode == 0:
+        inverse = 1000 - step
+        return (
+            max(0, min(255, round((base[0] * inverse + art[0] * step) / 1000.0))),
+            max(0, min(255, round((base[1] * inverse + art[1] * step) / 1000.0))),
+            max(0, min(255, round((base[2] * inverse + art[2] * step) / 1000.0))),
+        )
+
+    strength = math.sqrt(step / 1000.0)
+    # Integer Rec.709 luma; stable and substantially cheaper than colorsys.
+    luma = (2126 * art[0] + 7152 * art[1] + 722 * art[2]) / (255.0 * 10000.0)
+    peak = max(base)
+    if luma >= 0.5:
+        amount = min(1.0, (luma - 0.5) * 2.0 * 0.82)
+        target = tuple(round(channel + (255 - channel) * amount) for channel in base)
+    else:
+        amount = min(1.0, (0.5 - luma) * 2.0 * 0.88)
+        # Deepen the non-dominant channels but leave every peak channel alone.
+        # This encodes dark artwork as stronger saturation rather than dimness.
+        target = tuple(
+            channel if channel == peak else round(channel * (1.0 - 0.78 * amount))
+            for channel in base
+        )
+    luma_result = tuple(
+        max(0, min(255, round(base[index] + (target[index] - base[index]) * strength)))
+        for index in range(3)
     )
+    if mode == 1:
+        return luma_result
+
+    # Hybrid: retain the luma structure but let some actual cover hue through.
+    chroma_weight = min(0.34, (step / 1000.0) * 0.34)
+    mixed = tuple(
+        max(0, min(255, round(luma_result[index] * (1.0 - chroma_weight) + art[index] * chroma_weight)))
+        for index in range(3)
+    )
+    mixed_peak = max(mixed)
+    if peak > 0 and mixed_peak < peak:
+        scale = peak / max(1, mixed_peak)
+        mixed = tuple(max(0, min(255, round(channel * scale))) for channel in mixed)
+    return mixed
 
 
 def _visualizer_art_microtiles(
@@ -25186,16 +26696,28 @@ def visualizer_processing_phase(
 
 
 def frequency_warp_source_position(display_fraction: float) -> float:
-    """Map display x to source-frequency x for the experimental V29 curve.
+    """Map display x to source-frequency x for the smooth experimental curve.
 
-    x<=55% is exactly unchanged.  From there a monotonic cubic gradually opens
-    the middle while compressing source frequencies 70..100% into roughly the
-    final 15% of the display: f(.55)=.55, f(.85)=.70, f(1)=1, with slope 1 at
-    the 55% handoff so there is no visible kink where the transformation begins.
+    The lowest roughly 40% of source frequencies is compacted into about 30% of
+    the display with a zero-slope smoothstep.  A cubic Hermite bridge returns to
+    the unchanged middle at .55 with slope 1, then the established upper-range
+    compression keeps .70..1 in roughly the final 15% of the display.  The two
+    joins are monotonic and C1-continuous, so no visual kink is introduced.
     """
     x = max(0.0, min(1.0, float(display_fraction)))
+    if x <= 0.40:
+        t = x / 0.40
+        return 0.50 * (t * t * (3.0 - 2.0 * t))
     if x <= 0.55:
-        return x
+        t = (x - 0.40) / 0.15
+        t2 = t * t
+        t3 = t2 * t
+        # Cubic Hermite: (x,p,slope) = (.40,.50,0) -> (.55,.55,1).
+        h00 = 2.0 * t3 - 3.0 * t2 + 1.0
+        h10 = t3 - 2.0 * t2 + t
+        h01 = -2.0 * t3 + 3.0 * t2
+        h11 = t3 - t2
+        return max(0.0, min(1.0, h00 * 0.50 + h01 * 0.55 + h11 * 0.15))
     u = (x - 0.55) / 0.45
     curved = u + 2.25 * u * u * u - 2.25 * u * u
     return max(0.0, min(1.0, 0.55 + 0.45 * curved))
@@ -25251,6 +26773,7 @@ def render_drcs_visualizer(
     artwork_color_grid: tuple[tuple[tuple[int, int, int], ...], ...] | None = None,
     artwork_microtile_color_grid: tuple[tuple[tuple[int, int, int], ...], ...] | None = None,
     artwork_bar_strength: float = 0.0,
+    artwork_bar_blend_mode: int = 0,
     artwork_background_strength: float = 0.0,
     artwork_microtiles_enabled: bool = False,
     artwork_bar_microtiles_enabled: bool = False,
@@ -25259,6 +26782,7 @@ def render_drcs_visualizer(
     cell_rows_out: list[list[tuple[tuple[int, int, int], str]]] | None = None,
     semantic_cells_only: bool = False,
     rows_only: bool = False,
+    feedback_brightness: float = 1.0,
 ) -> str:
     """Render a spectrum with optional 2× horizontal sub-cell granularity.
 
@@ -25342,13 +26866,19 @@ def render_drcs_visualizer(
         == len(VISUALIZER_TREATMENT_NAMES) - 1
     )
     artwork_bar_strength = max(0.0, min(1.0, float(artwork_bar_strength)))
+    artwork_bar_blend_mode = max(0, min(len(ART_COLOR_VISUALIZER_BAR_BLEND_MODES) - 1, int(artwork_bar_blend_mode)))
     artwork_background_strength = max(0.0, min(1.0, float(artwork_background_strength)))
     # V231: these two static transforms used to happen inside colored_cell()/
     # artwork_background() thousands of times per frame.  The identity cache
     # moves them off the high-rate path without reducing color precision.
     weighted_art_grid = _visualizer_scaled_art_grid(
         artwork_color_grid, artwork_bar_strength, 1
-    ) if artwork_bar_strength > 0 else tuple()
+    ) if artwork_bar_strength > 0 and artwork_bar_blend_mode == 0 else tuple()
+    bar_detail_art_grid = (
+        artwork_color_grid
+        if artwork_bar_strength > 0 and artwork_bar_blend_mode in {1, 2} and artwork_color_grid
+        else tuple()
+    )
     background_art_grid = _visualizer_scaled_art_grid(
         artwork_color_grid, artwork_background_strength, 16 if visible_rows >= 24 else 1
     ) if artwork_background_strength > 0 else tuple()
@@ -25372,6 +26902,16 @@ def render_drcs_visualizer(
     )
     artwork_bar_strength_step = max(0, min(1000, round(artwork_bar_strength * 1000.0)))
     artwork_bar_base_weight = 1.0 - artwork_bar_strength
+    feedback_brightness = max(0.75, min(1.25, float(feedback_brightness)))
+
+    def feedback_rgb(color: tuple[int, int, int]) -> tuple[int, int, int]:
+        if abs(feedback_brightness - 1.0) < 0.0001:
+            return color
+        return tuple(
+            max(0, min(255, round(channel * feedback_brightness)))
+            for channel in color
+        )
+
     art_grid_exact = bool(
         artwork_color_grid
         and len(artwork_color_grid) >= visible_rows
@@ -25431,11 +26971,12 @@ def render_drcs_visualizer(
         # collapsing the per-cell truecolor traffic to one stable color. This
         # separates terminal byte/SGR volume from frame cadence.
         if force_monochrome:
-            return (180, 225, 255), level, (180, 225, 255)
-        energy_step = round(max(0.0, min(1.0, energies[logical_column])) * 15)
+            monochrome = feedback_rgb((180, 225, 255))
+            return monochrome, level, monochrome
         if row_independent_colors is not None:
             rendered = row_independent_colors[logical_column]
         else:
+            energy_step = round(max(0.0, min(1.0, energies[logical_column])) * 15)
             if spatial_rgb_grid:
                 base_color = spatial_rgb_grid[row][logical_column]
             else:
@@ -25447,29 +26988,40 @@ def render_drcs_visualizer(
                 *base_color, energy_step, fade_style, treatment_is_energy_rainbow
             )
         base_rendered = rendered
-        if weighted_art_grid and level:
+        if (weighted_art_grid or bar_detail_art_grid) and level:
             art_row_index = max(0, row - truncate_top_lines)
+            active_art_grid = weighted_art_grid if artwork_bar_blend_mode == 0 else bar_detail_art_grid
             if art_grid_exact:
-                art = weighted_art_grid[art_row_index][logical_column]
+                art = active_art_grid[art_row_index][logical_column]
             else:
-                art_row = weighted_art_grid[min(len(weighted_art_grid) - 1, art_row_index)]
+                art_row = active_art_grid[min(len(active_art_grid) - 1, art_row_index)]
                 art = art_row[min(len(art_row) - 1, max(0, logical_column))]
-            rendered = tuple(
-                max(0, min(255, round(channel * artwork_bar_base_weight) + art[index]))
-                for index, channel in enumerate(rendered)
-            )
+            if artwork_bar_blend_mode == 0:
+                rendered = (
+                    max(0, min(255, round(rendered[0] * artwork_bar_base_weight) + art[0])),
+                    max(0, min(255, round(rendered[1] * artwork_bar_base_weight) + art[1])),
+                    max(0, min(255, round(rendered[2] * artwork_bar_base_weight) + art[2])),
+                )
+            else:
+                rendered = _visualizer_blend_bar_art_cached(
+                    *rendered, *art, artwork_bar_strength_step, artwork_bar_blend_mode
+                )
         if source_rows >= 24:
-            rendered = tuple(min(255, round(channel / 32) * 32) for channel in rendered)
-        return rendered, level, base_rendered
+            rendered = (
+                min(255, round(rendered[0] / 32) * 32),
+                min(255, round(rendered[1] / 32) * 32),
+                min(255, round(rendered[2] / 32) * 32),
+            )
+        return feedback_rgb(rendered), level, feedback_rgb(base_rendered)
 
     def artwork_background(logical_column: int, row: int) -> tuple[int, int, int] | None:
         if not background_art_grid:
             return None
         art_row_index = max(0, row - truncate_top_lines)
         if art_grid_exact:
-            return background_art_grid[art_row_index][logical_column]
+            return feedback_rgb(background_art_grid[art_row_index][logical_column])
         art_row = background_art_grid[min(len(background_art_grid) - 1, art_row_index)]
-        return art_row[min(len(art_row) - 1, max(0, logical_column))]
+        return feedback_rgb(art_row[min(len(art_row) - 1, max(0, logical_column))])
 
     row_suffix = "\033[0m" + ("" if omit_erase_eol else "\033[K")
     line_rendition_reset = "" if omit_big_off else BIG_OFF
@@ -25482,28 +27034,45 @@ def render_drcs_visualizer(
     # halves of every cell on every row.  Precompute the height intercept once
     # per logical bin and keep the exact same quantization/output bytes.
     fast_twin_scaled_heights: list[float] | None = None
+    fast_twin_colors: list[tuple[int, int, int]] | None = None
     if (
         granularity == 3
         and row_independent_colors is not None
+        and not force_monochrome
         and not capture_rgb_rows
         and not weighted_art_grid
+        and not bar_detail_art_grid
         and not background_art_grid
         and not microtile_art_grid
         and not bar_microtile_art_grid
         and not any(top_blanks)
-        and source_rows < 24
     ):
         fast_twin_scaled_heights = [
             max(0.0, min(1.0, float(height))) * source_rows - source_rows + 1
             for height in heights
         ]
+        # Tall layouts intentionally use a coarser 32-step RGB grid to reduce
+        # terminal SGR churn.  The generic path used to redo that identical
+        # quantization for every filled cell; perform it once per frequency bin
+        # so the exact V311 colors can use the Twin-DRCS fast path at any height.
+        if source_rows >= 24:
+            fast_twin_colors = [
+                feedback_rgb((
+                    min(255, round(color[0] / 32) * 32),
+                    min(255, round(color[1] / 32) * 32),
+                    min(255, round(color[2] / 32) * 32),
+                ))
+                for color in row_independent_colors
+            ]
+        else:
+            fast_twin_colors = [feedback_rgb(color) for color in row_independent_colors]
     semantic_cells_only_fast_path = bool(semantic_cells_only and fast_twin_scaled_heights is not None and cell_rows_out is not None)
     for row in range(truncate_top_lines, source_rows):
         glyphs: list[str] = []
         row_rgb: list[tuple[int, int, int] | None] | None = [] if capture_rgb_rows else None
         if granularity == 3 and fast_twin_scaled_heights is not None:
             last_color: tuple[int, int, int] | None = None
-            colors = row_independent_colors or []
+            colors = fast_twin_colors or []
             semantic_row: list[tuple[tuple[int, int, int], str]] | None = [] if cell_rows_out is not None else None
             for terminal_column in range(terminal_width):
                 left_index = terminal_column * 2
@@ -25551,14 +27120,16 @@ def render_drcs_visualizer(
                     row_rgb is not None and row_rgb.append(None)
                     art_row_index = max(0, row - truncate_top_lines)
                     art_fg, art_bg, microtile = bar_microtile_art_grid[art_row_index][terminal_column]
+                    art_fg = feedback_rgb(art_fg)
+                    art_bg = feedback_rgb(art_bg)
                     base_bar = _visualizer_twin_blend_cached(
                         *left_base_color, *right_base_color, left_level, right_level
                     )
                     color = _visualizer_blend_bar_art_cached(
-                        *base_bar, *art_fg, artwork_bar_strength_step
+                        *base_bar, *art_fg, artwork_bar_strength_step, artwork_bar_blend_mode
                     )
                     background = _visualizer_blend_bar_art_cached(
-                        *base_bar, *art_bg, artwork_bar_strength_step
+                        *base_bar, *art_bg, artwork_bar_strength_step, artwork_bar_blend_mode
                     )
                     if source_rows >= 24:
                         color = tuple(min(255, round(channel / 32) * 32) for channel in color)
@@ -25578,6 +27149,8 @@ def render_drcs_visualizer(
                     row_rgb is not None and row_rgb.append(None)
                     art_row_index = max(0, row - truncate_top_lines)
                     color, background, microtile = microtile_art_grid[art_row_index][terminal_column]
+                    color = feedback_rgb(color)
+                    background = feedback_rgb(background)
                     if color != last_color or background != last_background:
                         glyphs.append(_visualizer_ansi_fg_bg_cached(*color, *background))
                         last_color = color
@@ -25764,10 +27337,46 @@ def volume_level_emoji(volume: int) -> str:
     return "🔊"
 
 
-def volume_status(volume: int, direction: str) -> str:
+VOLUME_INVERSE_BLINK_PHASE_SECONDS = 0.14
+VOLUME_INVERSE_BLINK_PHASE_COUNT = 6
+VOLUME_VISUALIZER_THROB_SECONDS = 0.50
+VOLUME_VISUALIZER_BOX_SECONDS = 2.0
+INTERACTION_VISUALIZER_BOX_FADE_SECONDS = 2.0
+CONSOLE_VISUALIZER_VOLUME_FEEDBACK_ENABLED = True
+
+
+def volume_inverse_blink_phase(now: float, changed_at: float) -> int:
+    """Return three inverse/normal pairs as phases 0..5, or -1 afterward."""
+    elapsed = float(now) - float(changed_at)
+    if elapsed < 0.0:
+        return -1
+    phase = int(elapsed / VOLUME_INVERSE_BLINK_PHASE_SECONDS)
+    return phase if phase < VOLUME_INVERSE_BLINK_PHASE_COUNT else -1
+
+
+def volume_visualizer_brightness_factor(
+    now: float,
+    changed_at: float,
+    direction: str,
+    *,
+    enabled: bool = True,
+) -> float:
+    """Return one subtle half-second brightness/darkness throb envelope."""
+    if not enabled:
+        return 1.0
+    elapsed = float(now) - float(changed_at)
+    if elapsed < 0.0 or elapsed >= VOLUME_VISUALIZER_THROB_SECONDS:
+        return 1.0
+    pulse = math.sin(math.pi * elapsed / VOLUME_VISUALIZER_THROB_SECONDS)
+    amplitude = 0.12 if direction == "up" else -0.12
+    return 1.0 + amplitude * pulse
+
+
+def volume_status(volume: int, direction: str, *, inverse: bool = False) -> str:
     """Return compact controls-row volume using icon + percent, never 'Vol'."""
     color = ansi_rgb(rainbow_rgb(1 - (max(0, min(100, volume)) / 100)))
-    return f"{color}{volume_level_emoji(volume)} {int(volume)}%\033[0m"
+    emphasis = "\033[7m" if inverse else ""
+    return f"{color}{emphasis}{volume_level_emoji(volume)} {int(volume)}%\033[0m"
 
 
 def volume_status_plain(volume: int, direction: str = "up") -> str:
@@ -26950,6 +28559,30 @@ def save_external_album_art_lyrics_mode(mode: int) -> None:
             _safe_winreg_set_value(
                 key, EXTERNAL_ALBUM_ART_LYRICS_MODE_V180_VALUE, 0, winreg.REG_DWORD, value
             )
+    except OSError:
+        pass
+
+
+def load_external_album_art_karaoke_enabled() -> bool:
+    """Return the independent popup-karaoke visibility flag (V336)."""
+    if os.name != "nt":
+        return lyrics_mode_includes_artwork(load_external_album_art_lyrics_mode())
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\ClaireCJS\play_audio_file") as key:
+            value, _kind = winreg.QueryValueEx(key, EXTERNAL_ALBUM_ART_KARAOKE_ENABLED_VALUE)
+        return bool(int(value))
+    except (OSError, TypeError, ValueError):
+        return lyrics_mode_includes_artwork(load_external_album_art_lyrics_mode())
+
+
+def save_external_album_art_karaoke_enabled(enabled: bool) -> None:
+    if os.name != "nt":
+        return
+    try:
+        import winreg
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\ClaireCJS\play_audio_file") as key:
+            _safe_winreg_set_value(key, EXTERNAL_ALBUM_ART_KARAOKE_ENABLED_VALUE, 0, winreg.REG_DWORD, int(bool(enabled)))
     except OSError:
         pass
 
@@ -28955,6 +30588,7 @@ def paf_web_control_schema() -> dict[str, object]:
             {"key": "processing_style", "label": "Processing", "options": options(PROCESSING_STYLE_NAMES)},
             {"key": "persistence_mode", "label": "Persistence", "options": options(PERSISTENCE_MODE_NAMES)},
             {"key": "visualizer_granularity", "label": "Granularity", "options": options(VISUALIZER_GRANULARITY_NAMES), "experimental": True, "theme": "visualizer"},
+            {"key": "art_color_bar_blend_mode", "label": "Bar artwork blend", "options": options(ART_COLOR_VISUALIZER_BAR_BLEND_MODES, start=0), "experimental": True, "theme": "visualizer", "tooltip": "EXP: Color mix is legacy RGB blending; Luma detail preserves bar peak brightness while carrying cover structure; Hybrid adds a smaller amount of cover hue."},
             {"key": "visualizer_input_source", "label": "Visualizer input", "options": options(LIVE_VISUALIZER_INPUT_NAMES), "theme": "visualizer", "tooltip": "Choose the spectrum input. Auto uses the current PAFPlayer track while playing, then switches to Windows WASAPI What You Hear + the default microphone while paused."},
             {"key": "truncate_visualizer_rows", "label": "Rows truncated\nfrom top", "options": [{"value": value, "label": str(value)} for value in range(0, 9)]},
             {"key": "karaoke_style", "label": "Karaoke style", "options": options(KARAOKE_STYLE_NAMES)},
@@ -29025,6 +30659,7 @@ def paf_web_control_schema() -> dict[str, object]:
             {"key": "art_color_black_strength", "label": "Cover art saturation in blackness", "min": 0, "max": 100, "step": 5, "suffix": "%"},
         ],
         "toggles": [
+            {"key": "console_visualizer_volume_feedback_enabled", "label": "Interaction feedback overlay", "web_key": "console_visualizer_volume_feedback_enabled", "theme": "visualizer", "tooltip": "Show console-control feedback centered over the visualizer: two seconds solid, then a two-second fade. Volume changes also throb the visualizer."},
             {"key": "art_color_blackness", "label": "Album art onto blackness", "web_key": "art_color_blackness"},
             {"key": "art_color_bars", "label": "Album art onto bars", "web_key": "art_color_bars", "theme": "visualizer"},
             {"key": "progress_beat_reactive", "label": "Beat-reactive illumination", "web_key": "progress_beat_reactive", "theme": "progress", "tooltip": "Pulse or throb the console progress bar from detected musical onsets; use Beat detection and Beat treatment to choose the behavior."},
@@ -29036,6 +30671,18 @@ def paf_web_control_schema() -> dict[str, object]:
             {"key": "mm_inspired_renderer_enabled", "label": "Disable experimental 5.1/7.1 mixer", "web_key": "mm_inspired_renderer_enabled", "experimental": True, "invert": True, "theme": "playback", "tooltip": "EXP: checked disables the MatrixMixer-inspired WAVEFORMATEXTENSIBLE renderer and uses the legacy FFplay/SDL path for multichannel audio."},
             {"key": "color_reverse", "label": "Reverse palette", "action": COLOR_REVERSE_TOGGLE},
             {"key": "karaoke_emojimax", "label": "Emojimaxx", "action": KARAOKE_EMOJI_TOGGLE},
+            {"key": "decensor_console_karaoke", "label": "De-censor profanity — Console", "web_key": "decensor_console_karaoke", "theme": "karaoke", "tooltip": "Display-only; restore profanity recognized by DeCensor.pm on asterisk-bearing Console Karaoke lines. Default off."},
+            {"key": "decensor_artwork_lyrics", "label": "De-censor profanity — Artwork", "web_key": "decensor_artwork_lyrics", "theme": "karaoke", "tooltip": "Display-only; restore profanity recognized by DeCensor.pm on asterisk-bearing album-art lyric lines. Default off."},
+            {"key": "decensor_floating_lyrics", "label": "De-censor profanity — Floating", "web_key": "decensor_floating_lyrics", "theme": "karaoke", "tooltip": "Display-only; restore profanity recognized by DeCensor.pm on asterisk-bearing floating lyric lines. Default off."},
+            {"key": "alert_no_replaygain", "label": "Red alert: no ReplayGain tag", "web_key": "alert_no_replaygain", "theme": "alerts", "tooltip": "Continuous bright-red console HUD alert for the entire track when a valid ReplayGain track gain/peak pair is missing. Uncheck to disable it."},
+            {"key": "alert_missing_artist", "label": "Alert of missing artist", "web_key": "alert_missing_artist", "theme": "alerts"},
+            {"key": "alert_missing_title", "label": "Alert of missing song title", "web_key": "alert_missing_title", "theme": "alerts"},
+            {"key": "alert_missing_karaoke", "label": "Alert of missing karaoke", "web_key": "alert_missing_karaoke", "theme": "alerts"},
+            {"key": "alert_missing_lyrics", "label": "Alert of missing lyrics", "web_key": "alert_missing_lyrics", "theme": "alerts"},
+            {"key": "alert_missing_artwork", "label": "Alert of missing artwork", "web_key": "alert_missing_artwork", "theme": "alerts"},
+            {"key": "alert_unknown_year", "label": "Alert of unknown year", "web_key": "alert_unknown_year", "theme": "alerts"},
+            {"key": "alert_unknown_genre", "label": "Alert of unknown genre", "web_key": "alert_unknown_genre", "theme": "alerts"},
+            {"key": "alert_embedded_lyrics_mismatch", "label": "Alert when embedded lyrics differ from sidecar", "web_key": "alert_embedded_lyrics_mismatch", "theme": "alerts", "tooltip": "Background content comparison using the same normalized lyric rules as audit_music_batch."},
             {"key": "drcs_enabled", "label": "Enable console visualizer", "action": DRCS_VISUALIZER_TOGGLE},
             {"key": "sixel_enabled", "label": "SIXEL visualizer", "action": SIXEL_VISUALIZER_TOGGLE, "experimental": True},
             {"key": "album_art_visualizer_enabled", "label": "Album art in visualizer", "action": ALBUM_ART_VISUALIZER_TOGGLE, "experimental": True},
@@ -29079,6 +30726,9 @@ def paf_web_allowed_actions() -> frozenset[str]:
         for item in group["items"]
     }
     actions.update({WEB_PLAY, WEB_PAUSE, WEB_OPEN_TRACK_FOLDER, WEB_EDIT_LYR, WEB_EDIT_KAR, WEB_RESTART_AUDIO, WEB_MATRIX_APPLY})
+    # These popup/floating controls have first-class web UI but intentionally
+    # do not appear in the generic bottom action catalog.
+    actions.update({ARTWORK_KARAOKE_TOGGLE, ARTWORK_KARAOKE_CONFIG, FLOATING_KARAOKE_CONFIG})
     actions.update(
         str(item["action"])
         for item in paf_web_control_schema()["toggles"] if "action" in item
@@ -29141,6 +30791,7 @@ def paf_web_action_is_allowed(action: str) -> bool:
         "art_color_representation": (0, len(ART_COLOR_VISUALIZER_REPRESENTATIONS) - 1),
         "art_color_blackness": (0, 1),
         "art_color_bars": (0, 1),
+        "art_color_bar_blend_mode": (0, len(ART_COLOR_VISUALIZER_BAR_BLEND_MODES) - 1),
         "art_color_karaoke_sides": (0, 1),
         "art_color_karaoke": (0, 1),
         "art_color_demo": (0, 1),
@@ -29162,10 +30813,23 @@ def paf_web_action_is_allowed(action: str) -> bool:
         "visualizer_granularity": (1, len(VISUALIZER_GRANULARITY_NAMES)),
         "visualizer_input_source": (1, len(LIVE_VISUALIZER_INPUT_NAMES)),
         "visualizer_rows": (4, 48),
+        "console_visualizer_volume_feedback_enabled": (0, 1),
         "truncate_visualizer_rows": (0, 8),
         "karaoke_style": (1, len(KARAOKE_STYLE_NAMES)),
         "karaoke_treatment": (1, len(KARAOKE_TREATMENT_NAMES)),
         "console_karaoke_enabled": (0, 1),
+        "decensor_console_karaoke": (0, 1),
+        "decensor_artwork_lyrics": (0, 1),
+        "decensor_floating_lyrics": (0, 1),
+        "alert_no_replaygain": (0, 1),
+        "alert_missing_artist": (0, 1),
+        "alert_missing_title": (0, 1),
+        "alert_missing_karaoke": (0, 1),
+        "alert_missing_lyrics": (0, 1),
+        "alert_missing_artwork": (0, 1),
+        "alert_unknown_year": (0, 1),
+        "alert_unknown_genre": (0, 1),
+        "alert_embedded_lyrics_mismatch": (0, 1),
         "progress_style": (1, len(PROGRESS_STYLE_NAMES)),
         "progress_bar_enabled": (0, 1),
         "progress_beat_reactive": (0, 1),
@@ -29270,6 +30934,8 @@ h1{
 }.muted{color:var(--muted)}.path{word-break:break-all;color:#95e6b5}
 .path-url-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(220px,max-content);gap:12px;align-items:start;max-width:100%}.path-url-row .path{min-width:0}.path-url-row #urls{min-width:0;display:flex;flex-direction:column;align-items:flex-start;gap:5px;justify-content:flex-start}
 #lyricDock{flex:0 0 auto;overflow:hidden;transition:none}
+#lyricDock.auto-expand{display:grid;align-items:center;justify-items:stretch}
+#lyricDock.auto-expand #lyric{width:100%;min-height:0;margin:0}
 #lyric{
   min-height:1.35em;
   margin:.28em 0 .18em;
@@ -29344,6 +31010,7 @@ button,select,input{font:inherit}
 .toggle.experimental{border-color:#705d2b}.toggle.experimental::after{content:" EXP";color:#ffd66b;font-size:.72em;font-weight:800}
 .control-item.experimental{position:relative;padding-right:46px}.control-item.experimental::after{content:"EXP";position:absolute;right:8px;top:5px;color:#ffd66b;font-size:.68em;font-weight:800;letter-spacing:.04em}
 .section-visualizer .control-item,.section-visualizer .toggle{background:#10283b;border-color:#287cb6}.section-visualizer h3{color:#6bc8ff}
+.section-visualizer .control-item[data-control-key="art_color_bar_blend_mode"]{background:#26322f;border-color:#8f9148}.section-visualizer .control-item[data-control-key="art_color_bar_blend_mode"] label{color:#e4dda0}.section-visualizer .control-item[data-control-key="art_color_bar_blend_mode"] select{border-color:#8f9148;background:#2a3330}.section-visualizer .control-item[data-control-key="art_color_bar_blend_mode"]::after{color:#ffe47a}
 .section-heading-row{display:flex;align-items:center;gap:10px}.section-heading-row h3{margin:.3em 0 .5em}
 .visualizer-master-switch{position:relative;display:inline-block;width:44px;height:23px;flex:0 0 44px;cursor:pointer;margin-top:-2px}
 .visualizer-master-switch input{opacity:0;width:0;height:0;position:absolute}
@@ -29431,13 +31098,27 @@ details{margin-top:18px}pre{white-space:pre-wrap;word-break:break-word;backgroun
   <div class="web-karaoke-actions" id="lyricWebOptions">
     <button id="editLyrButton" class="secondary-button lyric-option-button web-only-button" title="Edit plain lyrics: opens the matching .txt sidecar when one exists">✏️ Lyrics</button>
     <button id="editKarButton" class="secondary-button lyric-option-button web-only-button" title="Edit karaoke timing: opens matching .lrc and/or .srt sidecars when they exist">🎼 Karaoke</button>
-    <label class="tiny-toggle" title="Automatically size the current web karaoke line to fill its reserved viewport"><input type="checkbox" id="karaokeAutoExpand">Auto-size</label>
+    <label class="tiny-toggle" title="Expand the current Web Karaoke text to fill the lyric frame you assigned"><input type="checkbox" id="karaokeAutoExpand">Auto-Expand</label>
     <label class="tiny-toggle" title="Apply Emojimaxx substitutions to Web Karaoke only"><input type="checkbox" id="webEmojimaxToggle">Emojimaxx</label>
+    <label class="tiny-toggle" title="Display-only: restore recognized asterisk-masked profanity in Web Karaoke. Default off."><input type="checkbox" id="webDecensorToggle">De-censor profanity</label>
     <div class="web-karaoke-glow" title="Add a configurable glow/shadow around web lyrics for readability"><label><input type="checkbox" id="webKaraokeGlow">Glow</label><input type="color" id="webKaraokeGlowColor" value="#000000" title="Glow/shadow color"><label id="webKaraokeGlowLabel">Glow size 14%</label><input type="range" id="webKaraokeGlowSize" min="0" max="100" step="1" value="14"></div>
   </div>
 </div>
+<div class="group section-artwork-popup" id="artworkPopupSection">
+  <div class="section-heading-row"><label class="visualizer-master-switch" title="Show or hide the album artwork popup"><input type="checkbox" id="artworkPopupMasterToggle"><span class="visualizer-master-track"></span></label><h3>Artwork Pop-Up + Karaoke</h3></div>
+  <div class="toggle-grid" id="artworkPopupControls"><label class="toggle" title="Enable karaoke text in the album artwork popup"><input type="checkbox" id="artworkPopupKaraokeToggle"><span>Popup Karaoke</span></label><button id="artworkPopupConfigButton" class="secondary-button web-only-button" title="Configure artwork lyric coloring">🎨 Configure artwork karaoke</button></div>
+</div>
+<div class="group section-floating-lyrics" id="floatingLyricsSection">
+  <div class="section-heading-row"><label class="visualizer-master-switch" title="Show or hide floating lyrics"><input type="checkbox" id="floatingLyricsMasterToggle"><span class="visualizer-master-track"></span></label><h3>Floating Lyrics</h3></div>
+  <div class="toggle-grid" id="floatingLyricsControls"><button id="floatingLyricsConfigButton" class="secondary-button web-only-button" title="Configure floating lyric coloring">💬 Configure floating lyrics</button></div>
+</div>
 <div class="group section-karaoke" id="karaokeSection">
   <div class="section-heading-row"><label class="visualizer-master-switch" title="Turn Console Karaoke on/off"><input type="checkbox" id="karaokeMasterToggle"><span class="visualizer-master-track"></span></label><h3>Console Karaoke</h3></div><div class="control-grid" id="karaokeControls"></div>
+</div>
+<div class="group section-console-alerts" id="consoleAlertsSection">
+  <h3 title="Metadata/maintenance conditions surfaced on the console HUD">⚠️ Console Alerts</h3>
+  <div class="toggle-grid" id="consoleAlertsControls"></div>
+  <div class="note">ReplayGain missing is continuous for the whole track. Other enabled conditions alert once per track and remain listed under ? details.</div>
 </div>
 <div class="group section-visualizer" id="visualizerSection">
   <div class="section-heading-row"><label class="visualizer-master-switch" title="Turn Console Visualizer on/off"><input type="checkbox" id="visualizerMasterToggle"><span class="visualizer-master-track"></span></label><h3>Console Visualizer</h3></div><div class="control-grid" id="visualizerControls"></div>
@@ -29550,6 +31231,7 @@ const WEB_KARAOKE_KEY='paf-web-karaoke-v238';
 let webKaraokeSettings={};
 let rawWebLyric='';
 let lastWebLyricRenderSignature='';
+let webLyricRenderSequence=0;
 let webLyricSolutions=[];
 let hostSolutionSignature='';
 let lastLyricAnimationPaint=0;
@@ -29589,7 +31271,7 @@ for(const eventName of ['pointermove','pointerdown','wheel']){
 window.addEventListener('resize',()=>{if(karaokeAutoExpand&&lyricText){karaokeFitRetryCount=0;requestAnimationFrame(()=>requestAnimationFrame(fitKaraokeToDock))}},{passive:true});
 
 function loadWebKaraokeSettings(){
-  const base={enabled:true,style:1,treatment:2,emojimax:false,glow:true,glowColor:'#000000',glowSize:14,styleFav:[],treatmentFav:[],styleDefault:1,treatmentDefault:2};
+  const base={enabled:true,style:1,treatment:2,emojimax:false,decensor:false,glow:true,glowColor:'#000000',glowSize:14,styleFav:[],treatmentFav:[],styleDefault:1,treatmentDefault:2};
   const saved=webPrefGet(WEB_KARAOKE_KEY,{});return {...base,...(saved&&typeof saved==='object'&&!Array.isArray(saved)?saved:{})}
 }
 function saveWebKaraokeSettings(){webPrefSet(WEB_KARAOKE_KEY,webKaraokeSettings)}
@@ -29616,9 +31298,10 @@ function applyWebKaraokeEnabled(){
   if(master)master.checked=webKaraokeEnabled();if(section)section.classList.toggle('section-disabled',!webKaraokeEnabled());if(dock)dock.style.display=webKaraokeEnabled()?'':'none';
 }
 async function renderWebLyric(text,force=false){
-  rawWebLyric=String(text||'');const sig=[rawWebLyric,webKaraokeSettings.style,webKaraokeSettings.emojimax].join('\u241f');if(!force&&sig===lastWebLyricRenderSignature)return;lastWebLyricRenderSignature=sig;
+  rawWebLyric=String(text||'');const sig=[rawWebLyric,webKaraokeSettings.style,webKaraokeSettings.emojimax,webKaraokeSettings.decensor].join('\u241f');if(!force&&sig===lastWebLyricRenderSignature)return;lastWebLyricRenderSignature=sig;const requestSequence=++webLyricRenderSequence;
   let shown=rawWebLyric,solutions=[];
-  if(shown){try{const r=await fetch('/api/web-karaoke-render',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:shown,style:Number(webKaraokeSettings.style||1),emojimax:!!webKaraokeSettings.emojimax})});if(r.ok){const d=await r.json();shown=String(d.text??shown);solutions=Array.isArray(d.solutions)?d.solutions:[]}}catch(e){}}
+  if(shown){try{const r=await fetch('/api/web-karaoke-render',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({text:shown,style:Number(webKaraokeSettings.style||1),emojimax:!!webKaraokeSettings.emojimax,decensor:!!webKaraokeSettings.decensor})});if(r.ok){const d=await r.json();shown=String(d.text??shown);solutions=Array.isArray(d.solutions)?d.solutions:[]}}catch(e){}}
+  if(requestSequence!==webLyricRenderSequence)return;
   webLyricSolutions=solutions;setRainbowLyric(shown,solutions);applyWebKaraokeEnabled();applyWebKaraokeGlow();updateWebEmojimaxToggle();
 }
 function updateWebEmojimaxToggle(){const b=document.getElementById('webEmojimaxToggle');if(b)b.checked=!!webKaraokeSettings.emojimax}
@@ -29652,14 +31335,15 @@ function karaokeInkFits(host,available){
   // scrollHeight/scrollWidth are much more reliable for a lyric made of many
   // independently-colored inline spans than Range.getBoundingClientRect().
   // In particular, a fragmented Range could make a wrapped lyric look wider
-  // than its actual layout and drive V254/V257 Auto-size all the way to 8px.
+  // than its actual layout and drive V254/V257 Auto-Expand all the way to 8px.
   return host.scrollHeight+descenderGuard<=available && host.scrollWidth+horizontalGuard<=host.clientWidth+1;
 }
 let karaokeFitRetryCount=0;
 function fitKaraokeToDock(){
   const host=document.getElementById('lyric');
-  if(!karaokeAutoExpand || !lyricText){host.style.fontSize='';host.style.paddingBottom='';host.style.lineHeight='';karaokeFitRetryCount=0;applyWebKaraokeGlow();return}
   const dock=document.getElementById('lyricDock');
+  dock.classList.toggle('auto-expand',!!karaokeAutoExpand);
+  if(!karaokeAutoExpand || !lyricText){host.style.fontSize='';host.style.paddingBottom='';host.style.lineHeight='';karaokeFitRetryCount=0;applyWebKaraokeGlow();return}
   // Do not permanently "fit" against a zero/half-laid-out grid.  This was the
   // other route to postage-stamp karaoke: the first rAF could run while the
   // full-width lyric row still reported a tiny clientWidth, then never retry.
@@ -29670,20 +31354,12 @@ function fitKaraokeToDock(){
   karaokeFitRetryCount=0;
   host.style.fontSize='';host.style.paddingBottom='0.18em';host.style.lineHeight='1.04';
   const base=Math.max(28,parseFloat(getComputedStyle(host).fontSize)||42);
-  let available=Math.max(70,(lyricReservedHeight||dock.clientHeight)-8);
+  // The resize handle owns the frame. Auto-Expand owns only the type inside it.
+  // Always measure the real assigned frame so the text actually fills it.
+  let available=Math.max(70,dock.clientHeight-8);
   host.style.fontSize=base+'px';
-  // Auto-size means EXPAND.  Never make a lyric smaller than the ordinary web
-  // karaoke CSS size.  If the base text needs more vertical room, grow the dock
-  // first rather than shrinking the letters into unreadability.
-  const baseGuard=Math.max(5,base*.14);
-  const neededAtBase=Math.ceil(host.scrollHeight+baseGuard+10);
-  const maxReadableDock=Math.max(132,Math.min(360,window.innerHeight*.34));
-  if(neededAtBase>available && lyricReservedHeight<maxReadableDock){
-    lyricReservedHeight=Math.min(maxReadableDock,Math.max(lyricReservedHeight||0,neededAtBase));
-    dock.style.height=lyricReservedHeight+'px';
-    available=Math.max(70,lyricReservedHeight-8);
-  }
-  let lo=base,hi=Math.max(base,Math.min(360,Math.max(base*4,available*.95,window.innerWidth*.16))),best=base;
+  // Auto-Expand never makes a lyric smaller than ordinary Web Karaoke.
+  let lo=base,hi=Math.max(base,Math.min(720,Math.max(base*4,available*1.08,window.innerWidth*.22))),best=base;
   if(karaokeInkFits(host,available)){
     for(let i=0;i<14;i++){const mid=(lo+hi)/2;host.style.fontSize=mid+'px';if(karaokeInkFits(host,available)){best=mid;lo=mid}else hi=mid}
   }else{
@@ -29699,14 +31375,10 @@ function updateKaraokeReservation(now=performance.now()){
   const dock=document.getElementById('lyricDock');
   const needed=lyricNaturalHeight()+4;
   if(karaokeAutoExpand && lyricText){
-    const topBottom=Math.max(document.querySelector('.art-pane')?.getBoundingClientRect().bottom||0,document.getElementById('playerFixed').getBoundingClientRect().bottom||0);
-    const room=Math.max(needed,window.innerHeight-topBottom-185);
     const manual=Number(localStorage.getItem('paf-web-lyric-height-px')||0);
-    const autoFloor=Math.max(142,Math.min(280,window.innerHeight*.20));
-    const autoCeiling=Math.max(autoFloor,Math.min(360,window.innerHeight*.34));
-    const manualHeight=manual>=autoFloor*.82?manual:0;
-    const preferred=Math.max(needed,autoFloor,Math.min(room,autoCeiling),manualHeight);
-    lyricReservedHeight=Math.max(autoFloor,Math.min(autoCeiling,preferred));
+    const manualHeight=manual>=70?manual:0;
+    const assigned=Math.max(70,manualHeight,lyricReservedHeight||0,dock.clientHeight||0);
+    lyricReservedHeight=assigned;
     lyricUnusedSince=null;dock.style.height=lyricReservedHeight+'px';
     requestAnimationFrame(()=>requestAnimationFrame(fitKaraokeToDock));return;
   }
@@ -29804,7 +31476,7 @@ function resizeCanvas(){
 
 function browserSpectrumProcess(raw,width,mode,frequencyWarp){
   const source=raw instanceof Uint8Array?raw:new Uint8Array(raw||0);if(!source.length||!width)return [];
-  const warp=x=>{x=Math.max(0,Math.min(1,x));if(x<=.55)return x;const u=(x-.55)/.45;return Math.max(0,Math.min(1,.55+.45*(u+2.25*u*u*u-2.25*u*u)))};
+ const warp=x=>{x=Math.max(0,Math.min(1,x));if(x<=.4){const t=x/.4;return .5*t*t*(3-2*t)}if(x<=.55){const t=(x-.4)/.15,t2=t*t,t3=t2*t;return 2*t3-3*t2+1>=0?Math.max(0,Math.min(1,(2*t3-3*t2+1)*.5+(-2*t3+3*t2)*.55+(t3-t2)*.15)):0}const u=(x-.55)/.45;return Math.max(0,Math.min(1,.55+.45*(u+2.25*u*u*u-2.25*u*u)))};
   mode=Math.max(1,Number(mode)||1);const horizontalPower=mode===1?2.30:2.40;let values=new Array(width);
   for(let column=0;column<width;column++){const f=column/Math.max(1,width-1),p=frequencyWarp?warp(f):f;const index=Math.max(0,Math.min(source.length-1,Math.round((p**horizontalPower)*(source.length-1)*.90)));let v=source[index]/64;v=Math.max(0,v*(.30+.70*(((column+1)/width)**.30))-.065);values[column]=v}
   const treatment=Math.floor((mode-1)/25),visualizerType=(mode-1)%25;const radii=[0,1,2,3,0,1,2,0,3,1,0,2,4,0,1],radius=radii[Math.max(0,Math.min(radii.length-1,treatment))]||0;
@@ -29819,7 +31491,7 @@ function browserSpectrumProcess(raw,width,mode,frequencyWarp){
 
 function initSpectrumWorker(){
   if(!window.Worker)return;
-  const source=`let gain=2;function go(raw,width,mode,frequencyWarp){const s=new Uint8Array(raw);if(!s.length||!width)return [];const warp=x=>{x=Math.max(0,Math.min(1,x));if(x<=.55)return x;const u=(x-.55)/.45;return Math.max(0,Math.min(1,.55+.45*(u+2.25*u*u*u-2.25*u*u)))};mode=Math.max(1,Number(mode)||1);const hp=mode===1?2.30:2.40;let v=new Array(width);for(let c=0;c<width;c++){const f=c/Math.max(1,width-1),p=frequencyWarp?warp(f):f,i=Math.max(0,Math.min(s.length-1,Math.round((p**hp)*(s.length-1)*.90)));let x=s[i]/64;x=Math.max(0,x*(.30+.70*(((c+1)/width)**.30))-.065);v[c]=x}const t=Math.floor((mode-1)/25),vt=(mode-1)%25,r=[0,1,2,3,0,1,2,0,3,1,0,2,4,0,1][Math.max(0,Math.min(14,t))]||0;if(r){const o=v;v=o.map((_,i)=>{let z=0,n=0;for(let j=Math.max(0,i-r);j<Math.min(width,i+r+1);j++){z+=o[j];n++}return z/Math.max(1,n)})}if([1,6,11].includes(t))v=v.map(x=>Math.max(0,x-.08));else if([3,8,13].includes(t))v=v.map(x=>x**.72);else if([4,9,14].includes(t))v=v.map(x=>Math.round(x*8)/8);else if([5,10].includes(t))v=v.map((x,i)=>x*(.72+.38*i/Math.max(1,width-1)));const gs=[1,1.28,.78,1.08,.62,1.5,.9,1.15,.7,1.35,.82,1.7,.55,1.02,1.22],as=[.90,.78,.98,.76,1,.72,.88,.82,1,.74,.96,.68,1,.86,.80],q=Math.max(0,Math.min(14,t)),tg=vt===0?1.08:(vt===1?.95:1);v=v.map(x=>Math.min(1,(Math.max(0,x)**gs[q])*as[q]*tg));const nz=v.filter(x=>x>0).sort((a,b)=>a-b);if(!nz.length){gain=Math.max(1,gain*.92);return v}const peak=nz[Math.min(nz.length-1,Math.max(0,Math.round((nz.length-1)*.90)))];if(peak<.025){gain=Math.max(1,gain*.94);return v.map(x=>x<.01625?0:x)}const d=Math.min(5,Math.max(1,.90/peak)),sm=d<gain?.55:.30;gain+=(d-gain)*sm;return v.map(x=>Math.min(1,(x*gain)**.92))}onmessage=e=>{const d=e.data||{};postMessage(go(d.raw,d.width,d.mode,d.frequencyWarp))}`;
+ const source=`let gain=2;function go(raw,width,mode,frequencyWarp){const s=new Uint8Array(raw);if(!s.length||!width)return [];const warp=x=>{x=Math.max(0,Math.min(1,x));if(x<=.4){const t=x/.4;return .5*t*t*(3-2*t)}if(x<=.55){const t=(x-.4)/.15,t2=t*t,t3=t2*t;return (2*t3-3*t2+1)*.5+(-2*t3+3*t2)*.55+(t3-t2)*.15}const u=(x-.55)/.45;return Math.max(0,Math.min(1,.55+.45*(u+2.25*u*u*u-2.25*u*u)))};mode=Math.max(1,Number(mode)||1);const hp=mode===1?2.30:2.40;let v=new Array(width);for(let c=0;c<width;c++){const f=c/Math.max(1,width-1),p=frequencyWarp?warp(f):f,i=Math.max(0,Math.min(s.length-1,Math.round((p**hp)*(s.length-1)*.90)));let x=s[i]/64;x=Math.max(0,x*(.30+.70*(((c+1)/width)**.30))-.065);v[c]=x}const t=Math.floor((mode-1)/25),vt=(mode-1)%25,r=[0,1,2,3,0,1,2,0,3,1,0,2,4,0,1][Math.max(0,Math.min(14,t))]||0;if(r){const o=v;v=o.map((_,i)=>{let z=0,n=0;for(let j=Math.max(0,i-r);j<Math.min(width,i+r+1);j++){z+=o[j];n++}return z/Math.max(1,n)})}if([1,6,11].includes(t))v=v.map(x=>Math.max(0,x-.08));else if([3,8,13].includes(t))v=v.map(x=>x**.72);else if([4,9,14].includes(t))v=v.map(x=>Math.round(x*8)/8);else if([5,10].includes(t))v=v.map((x,i)=>x*(.72+.38*i/Math.max(1,width-1)));const gs=[1,1.28,.78,1.08,.62,1.5,.9,1.15,.7,1.35,.82,1.7,.55,1.02,1.22],as=[.90,.78,.98,.76,1,.72,.88,.82,1,.74,.96,.68,1,.86,.80],q=Math.max(0,Math.min(14,t)),tg=vt===0?1.08:(vt===1?.95:1);v=v.map(x=>Math.min(1,(Math.max(0,x)**gs[q])*as[q]*tg));const nz=v.filter(x=>x>0).sort((a,b)=>a-b);if(!nz.length){gain=Math.max(1,gain*.92);return v}const peak=nz[Math.min(nz.length-1,Math.max(0,Math.round((nz.length-1)*.90)))];if(peak<.025){gain=Math.max(1,gain*.94);return v.map(x=>x<.01625?0:x)}const d=Math.min(5,Math.max(1,.90/peak)),sm=d<gain?.55:.30;gain+=(d-gain)*sm;return v.map(x=>Math.min(1,(x*gain)**.92))}onmessage=e=>{const d=e.data||{};postMessage(go(d.raw,d.width,d.mode,d.frequencyWarp))}`;
   try{const url=URL.createObjectURL(new Blob([source],{type:'application/javascript'}));spectrumWorker=new Worker(url);URL.revokeObjectURL(url);spectrumWorker.onmessage=e=>{if(webVisualizerEnabled)spectrumTarget=Array.isArray(e.data)?e.data:[]};}catch(e){spectrumWorker=null}
 }
 function processRawSpectrumBuffer(buffer){
@@ -29951,6 +31623,14 @@ function syncControls(s){
   const karaokeMaster=document.getElementById('karaokeMasterToggle'), karaokeSection=document.getElementById('karaokeSection');
   if(karaokeMaster && s.console_karaoke_enabled!==undefined) karaokeMaster.checked=!!s.console_karaoke_enabled;
   if(karaokeSection && s.console_karaoke_enabled!==undefined) karaokeSection.classList.toggle('section-disabled',!s.console_karaoke_enabled);
+  const popupMaster=document.getElementById('artworkPopupMasterToggle'),popupKaraoke=document.getElementById('artworkPopupKaraokeToggle'),popupConfig=document.getElementById('artworkPopupConfigButton');
+  if(popupMaster && s.external_album_art_enabled!==undefined) popupMaster.checked=!!s.external_album_art_enabled;
+  const lyricMode=Number(s.lyrics_mode??0), artworkKaraoke=s.artwork_karaoke_enabled!==undefined ? !!s.artwork_karaoke_enabled : (lyricMode===0||lyricMode===2);
+  if(popupKaraoke) { popupKaraoke.checked=artworkKaraoke; popupKaraoke.disabled=!!(popupMaster&&!popupMaster.checked); }
+  if(popupConfig) popupConfig.disabled=!!(popupMaster&&!popupMaster.checked);
+  const floatingMaster=document.getElementById('floatingLyricsMasterToggle'),floatingConfig=document.getElementById('floatingLyricsConfigButton');
+  if(floatingMaster && s.floating_lyrics_enabled!==undefined) floatingMaster.checked=!!s.floating_lyrics_enabled;
+  if(floatingConfig) floatingConfig.disabled=!!(floatingMaster&&!floatingMaster.checked);
   const progressMaster=document.getElementById('progressMasterToggle'), progressSection=document.getElementById('progressSection');
   if(progressMaster && s.progress_bar_enabled!==undefined) progressMaster.checked=!!s.progress_bar_enabled;
   if(progressSection && s.progress_bar_enabled!==undefined) progressSection.classList.toggle('section-disabled',!s.progress_bar_enabled);
@@ -30241,11 +31921,12 @@ async function build(){
   setupWebPlaylistQueue();
   const autoExpand=document.getElementById('karaokeAutoExpand');
   karaokeAutoExpand=localStorage.getItem('paf-karaoke-auto-expand')==='1';autoExpand.checked=karaokeAutoExpand;
-  autoExpand.onchange=()=>{karaokeAutoExpand=!!autoExpand.checked;localStorage.setItem('paf-karaoke-auto-expand',karaokeAutoExpand?'1':'0');lyricReservedHeight=0;updateKaraokeReservation();fitKaraokeToDock()};
-  document.getElementById('editLyrButton').onclick=()=>action('web-edit-lyr');document.getElementById('editKarButton').onclick=()=>action('web-edit-kar');document.getElementById('webEmojimaxToggle').onchange=e=>{webKaraokeSettings.emojimax=!!e.target.checked;saveWebKaraokeSettings();renderWebLyric(rawWebLyric,true)};setupWebKaraokeGlow();
+  autoExpand.onchange=()=>{karaokeAutoExpand=!!autoExpand.checked;localStorage.setItem('paf-karaoke-auto-expand',karaokeAutoExpand?'1':'0');const dock=document.getElementById('lyricDock');if(karaokeAutoExpand&&lyricReservedHeight<=0)lyricReservedHeight=Math.max(70,Number(localStorage.getItem('paf-web-lyric-height-px')||0),dock.clientHeight||0);dock.classList.toggle('auto-expand',karaokeAutoExpand);updateKaraokeReservation();fitKaraokeToDock()};
+  document.getElementById('editLyrButton').onclick=()=>action('web-edit-lyr');document.getElementById('editKarButton').onclick=()=>action('web-edit-kar');document.getElementById('webEmojimaxToggle').onchange=e=>{webKaraokeSettings.emojimax=!!e.target.checked;saveWebKaraokeSettings();renderWebLyric(rawWebLyric,true)};
+  document.getElementById('webDecensorToggle').checked=!!webKaraokeSettings.decensor;document.getElementById('webDecensorToggle').onchange=e=>{webKaraokeSettings.decensor=!!e.target.checked;saveWebKaraokeSettings();renderWebLyric(rawWebLyric,true)};setupWebKaraokeGlow();
   const webKaraokeMaster=document.getElementById('webKaraokeMasterToggle');webKaraokeMaster.onchange=()=>{webKaraokeSettings.enabled=!!webKaraokeMaster.checked;saveWebKaraokeSettings();applyWebKaraokeEnabled()};applyWebKaraokeEnabled();updateWebEmojimaxToggle();
   const webKaraokeControls=document.getElementById('webKaraokeControls');for(const k of ['karaoke_style','karaoke_treatment']){const item=(controlSchema.selects||[]).find(x=>x.key===k);if(item)webKaraokeControls.appendChild(makeWebKaraokeSelect(k==='karaoke_style'?'style':'treatment',item))}
-  const visualizer=document.getElementById('visualizerControls'), karaoke=document.getElementById('karaokeControls'), progress=document.getElementById('progressControls'), playback=document.getElementById('playbackControls'), experimentalSelects=document.getElementById('experimentalSelectControls');
+  const visualizer=document.getElementById('visualizerControls'), karaoke=document.getElementById('karaokeControls'), progress=document.getElementById('progressControls'), playback=document.getElementById('playbackControls'), consoleAlerts=document.getElementById('consoleAlertsControls'), experimentalSelects=document.getElementById('experimentalSelectControls');
   const visualizerMaster=document.getElementById('visualizerMasterToggle');
   visualizerMaster.onchange=()=>action('drcs-visualizer-toggle');
   const karaokeMaster=document.getElementById('karaokeMasterToggle');
@@ -30254,7 +31935,8 @@ async function build(){
   progressMaster.onchange=()=>action('web-set:progress_bar_enabled:'+(progressMaster.checked?'1':'0'));
   for(const item of [...(controlSchema.selects||[]),...(controlSchema.sliders||[])]){
     let host=visualizer;
-    if(item.key==='visualizer_granularity') host=experimentalSelects;
+    if(item.key==='art_color_bar_blend_mode') host=visualizer;
+    else if(item.key==='visualizer_granularity') host=experimentalSelects;
     else if(item.experimental) host=experimentalSelects;
     else if(['output_device','output_rate','output_bit_depth','speed_index','output_channels','balance'].includes(item.key)) host=playback;
     else if(item.key.startsWith('karaoke')) host=karaoke;
@@ -30270,19 +31952,24 @@ async function build(){
   const experimental=document.getElementById('experimentalControls');
   (controlSchema.toggles||[]).forEach(item=>{
     if(item.key==='drcs_enabled' || item.key==='art_color_blackness' || item.key==='art_color_bars' || item.key==='shuffle' || item.key==='loop') return;
-    const playbackKeys=['shuffle','loop','autoplay','external_album_art_enabled','floating_lyrics_enabled'];
-    const karaokeKeys=['karaoke_emojimax'];
+    const playbackKeys=['shuffle','loop','autoplay'];
+    const karaokeKeys=['karaoke_emojimax','decensor_console_karaoke'];
     const webKaraokeKeys=['cursive_fix'];
     const visualizerKeys=['color_reverse','frequency_warp_enabled'];
     const progressKeys=['progress_beat_reactive'];
+    const alertKeys=['alert_no_replaygain','alert_missing_artist','alert_missing_title','alert_missing_karaoke','alert_missing_lyrics','alert_missing_artwork','alert_unknown_year','alert_unknown_genre','alert_embedded_lyrics_mismatch'];
     const brokenKeys=['sixel_enabled','album_art_visualizer_enabled','karaoke_visualizer_expansion_enabled'];
     let target=toggles;
+    if(['external_album_art_enabled','floating_lyrics_enabled'].includes(item.key)) return;
     if(brokenKeys.includes(item.key)) target=document.getElementById('brokenControls');
     else if(webKaraokeKeys.includes(item.key)) target=webKaraokeControls;
+    else if(item.key==='decensor_artwork_lyrics') target=document.getElementById('artworkPopupControls');
+    else if(item.key==='decensor_floating_lyrics') target=document.getElementById('floatingLyricsControls');
     else if(visualizerKeys.includes(item.key)) target=visualizer;
     else if(item.experimental) target=experimental;
     else if(item.key.startsWith('art_color_') || item.key==='drcs_enabled') target=visualizer;
     else if(progressKeys.includes(item.key)) target=progress;
+    else if(alertKeys.includes(item.key)) target=consoleAlerts;
     else if(playbackKeys.includes(item.key)) target=playbackToggles;
     else if(karaokeKeys.includes(item.key)) target=karaoke;
     target.appendChild(makeToggle(item));
@@ -30290,6 +31977,13 @@ async function build(){
   const microtileDisableBars=document.getElementById('microtileDisableBars'),microtileDisableBlackness=document.getElementById('microtileDisableBlackness');
   if(microtileDisableBars)microtileDisableBars.onchange=()=>action('web-set:drcs_art_bar_microtiles:'+(microtileDisableBars.checked?'0':'1'));
   if(microtileDisableBlackness)microtileDisableBlackness.onchange=()=>action('web-set:drcs_art_microtiles:'+(microtileDisableBlackness.checked?'0':'1'));
+  const popupMaster=document.getElementById('artworkPopupMasterToggle'),popupKaraoke=document.getElementById('artworkPopupKaraokeToggle'),floatingMaster=document.getElementById('floatingLyricsMasterToggle');
+  if(popupMaster)popupMaster.onchange=()=>action('external-album-art-toggle');
+  if(floatingMaster)floatingMaster.onchange=()=>action('floating-lyrics-toggle');
+  if(popupKaraoke)popupKaraoke.onchange=()=>action('artwork-karaoke-toggle');
+  const popupConfig=document.getElementById('artworkPopupConfigButton'),floatingConfig=document.getElementById('floatingLyricsConfigButton');
+  if(popupConfig)popupConfig.onclick=()=>action('artwork-karaoke-config');
+  if(floatingConfig)floatingConfig.onclick=()=>action('floating-karaoke-config');
   // V247 progress layout: style/type is the leftmost control; the illumination
   // enable sits immediately beside its Beat detection selector, followed by the
   // treatment. This makes the dependency visually obvious instead of scattering
@@ -30563,10 +32257,23 @@ class PAFWebServer:
             "floating_lyrics_enabled": lyrics_mode_includes_floating(load_external_album_art_lyrics_mode()),
             "art_color_demo": False,
             "drcs_enabled": True,
+            "console_visualizer_volume_feedback_enabled": True,
             "visualizer_input_source": DEFAULT_VISUALIZER_INPUT_SOURCE,
             "visualizer_input_status": "PAFPlayer audio",
             "web_visualizer_enabled": True,
             "console_karaoke_enabled": True,
+            "decensor_console_karaoke": False,
+            "decensor_artwork_lyrics": False,
+            "decensor_floating_lyrics": False,
+            "alert_no_replaygain": True,
+            "alert_missing_artist": True,
+            "alert_missing_title": True,
+            "alert_missing_karaoke": False,
+            "alert_missing_lyrics": False,
+            "alert_missing_artwork": False,
+            "alert_unknown_year": False,
+            "alert_unknown_genre": False,
+            "alert_embedded_lyrics_mismatch": True,
             "progress_bar_enabled": True,
             "progress_beat_reactive": True,
             "progress_beat_detector": 1,
@@ -30944,6 +32651,8 @@ class PAFWebServer:
                         text = str(payload.get("text", ""))[:8192]
                         style = min(len(KARAOKE_STYLE_NAMES), max(1, int(payload.get("style", 1))))
                         emojimax = bool(payload.get("emojimax", False))
+                        decensor = bool(payload.get("decensor", False))
+                        text = decensor_lyric_line(text, decensor)
                         rendered = stylize_web_karaoke_with_emojimax(text, style, emojimax)
                         _plain, raw_solutions = emojimax_plain_with_solutions(text, emojimax)
                         solutions = [
@@ -31429,7 +33138,11 @@ class ExternalAlbumArtWindow:
         self._web_url = ""
         self._track_identity = ""
         self._current_lyric = ""
+        self._current_lyric_artwork = ""
+        self._current_lyric_floating = ""
         self._current_lyric_source = ""
+        self._current_lyric_source_artwork = ""
+        self._current_lyric_source_floating = ""
         self._current_lyric_emojimax = False
         self._current_lyric_upstream_emojimax = False
         self._popup_emojimax_enabled = load_external_album_art_popup_emojimax()
@@ -31447,6 +33160,7 @@ class ExternalAlbumArtWindow:
         self._geometry_snapshot = load_external_album_art_geometry() or ""
         self._outer_rect_snapshot: tuple[int, int, int, int] | None = None
         self._native_rect_transient = False  # True only while idle/dance animation temporarily moves the HWND.
+        self._playback_running = False  # V304: idle artwork may dance only while PAFPlayer audio is actually playing.
         # Capture the console/terminal while the playback owner still has focus.
         # Tk() itself can momentarily activate a new top-level before it is
         # withdrawn; using this pre-Tk HWND lets V173 restore the console after
@@ -31635,6 +33349,11 @@ class ExternalAlbumArtWindow:
         """Return the persistent floating-lyrics mode shared by console and web toggles."""
         return lyrics_mode_includes_floating(load_external_album_art_lyrics_mode())
 
+    @property
+    def lyrics_mode(self) -> int:
+        """Return the shared artwork/floating lyric destination mode."""
+        return max(0, min(2, int(load_external_album_art_lyrics_mode() or 0)))
+
     def toggle_floating_lyrics(self) -> bool:
         """Toggle floating lyrics independently of artwork and return the expected new state."""
         with self._lock:
@@ -31646,14 +33365,37 @@ class ExternalAlbumArtWindow:
         append_pafplayer_trace("lyrics.floating.toggle-request", enabled=expected)
         return expected
 
-    def update_lyric(self, lyric: str, emphasis_progress: float = 0.0, *, emojimax: bool = False) -> None:
-        """Publish one canonical lyric state to the two Tk karaoke renderers.
+    def open_karaoke_color_configurator(self, target: str) -> None:
+        """Open the same artwork/floating lyric options dialog as the popup buttons."""
+        wanted = "floating" if str(target).casefold() == "floating" else "artwork"
+        with self._lock:
+            if self._closed:
+                return
+        self._ensure_started()
+        self._commands.put(("show-karaoke-color-configurator", wanted))
+        append_pafplayer_trace("lyrics.color-config.open-request", target=wanted)
 
-        V302 deliberately checks cue identity *before* Emojimax/styling work.
-        Progress-only ticks therefore update one float/queue message instead of
-        re-tokenizing and re-stylizing the same lyric ten times per second.
-        """
-        source = str(lyric or "").strip()
+    def set_artwork_karaoke_enabled(self, enabled: bool) -> bool:
+        """Enable/disable popup karaoke without changing floating-lyrics mode."""
+        value = bool(enabled)
+        save_external_album_art_karaoke_enabled(value)
+        self._ensure_started()
+        self._commands.put(("set-artwork-karaoke-enabled", value))
+        append_pafplayer_trace("lyrics.artwork.toggle-request", enabled=value)
+        return value
+
+    @property
+    def artwork_karaoke_enabled(self) -> bool:
+        return load_external_album_art_karaoke_enabled()
+
+    def update_lyric(
+        self, lyric: str, emphasis_progress: float = 0.0, *, emojimax: bool = False,
+        decensor_artwork: bool = False, decensor_floating: bool = False,
+    ) -> None:
+        """Publish one cue to artwork/floating renderers with independent display-only de-censoring."""
+        raw_source = str(lyric or "").strip()
+        artwork_source = decensor_lyric_line(raw_source, decensor_artwork)
+        floating_source = decensor_lyric_line(raw_source, decensor_floating)
         upstream = bool(emojimax)
         progress = max(0.0, min(1.0, float(emphasis_progress)))
         with self._lock:
@@ -31661,39 +33403,52 @@ class ExternalAlbumArtWindow:
                 return
             popup_emojimax = bool(self._popup_emojimax_enabled)
             popup_color = bool(self._popup_color_emoji_enabled)
+            artwork_enabled = load_external_album_art_karaoke_enabled()
             use_emoji = bool(upstream and popup_emojimax)
             text_inputs_changed = bool(
-                source != self._current_lyric_source
+                artwork_source != self._current_lyric_source_artwork
+                or floating_source != self._current_lyric_source_floating
                 or use_emoji != self._current_lyric_emojimax
                 or upstream != self._current_lyric_upstream_emojimax
+                or (not artwork_enabled and bool(self._current_lyric_artwork))
             )
             progress_changed = abs(progress - self._current_lyric_progress) >= 0.005
             if not text_inputs_changed and not progress_changed:
                 return
-            current_value = self._current_lyric
+            artwork_value = self._current_lyric_artwork
+            floating_value = self._current_lyric_floating
 
-        solutions = None
-        value = current_value
+        # The popup checkbox is an independent hard gate. Do not enqueue or
+        # retain artwork lyric text while it is disabled, even if a cue arrives
+        # concurrently with the web action.
+        if not artwork_enabled:
+            artwork_value = ""
+
+        artwork_solutions = floating_solutions = None
         if text_inputs_changed:
             monochrome_safe = not popup_color
-            value = (
-                stylize_karaoke_with_emojimax(
-                    source, 1, use_emoji, 1.0,
-                    force_emoji_when_enabled=True,
-                    monochrome_safe=monochrome_safe,
-                )
-                if source else ""
-            )
-            _plain, solutions = emojimax_plain_with_solutions(
-                source, use_emoji, monochrome_safe=monochrome_safe
-            )
+            def styled(source: str) -> tuple[str, list[dict[str, str]]]:
+                value = stylize_karaoke_with_emojimax(
+                    source, 1, use_emoji, 1.0, force_emoji_when_enabled=True, monochrome_safe=monochrome_safe,
+                ) if source else ""
+                _plain, solutions = emojimax_plain_with_solutions(source, use_emoji, monochrome_safe=monochrome_safe)
+                return value, list(solutions or [])
+            artwork_value, artwork_solutions = styled(artwork_source)
+            if floating_source == artwork_source:
+                floating_value, floating_solutions = artwork_value, list(artwork_solutions)
+            else:
+                floating_value, floating_solutions = styled(floating_source)
 
         with self._lock:
             if self._closed:
                 return
             if text_inputs_changed:
-                self._current_lyric = value
-                self._current_lyric_source = source
+                self._current_lyric = artwork_value
+                self._current_lyric_artwork = artwork_value
+                self._current_lyric_floating = floating_value
+                self._current_lyric_source = raw_source
+                self._current_lyric_source_artwork = artwork_source
+                self._current_lyric_source_floating = floating_source
                 self._current_lyric_emojimax = use_emoji
                 self._current_lyric_upstream_emojimax = upstream
             self._current_lyric_progress = progress
@@ -31701,14 +33456,20 @@ class ExternalAlbumArtWindow:
             return
         if self._thread is not None and self._thread.is_alive():
             if text_inputs_changed:
-                self._commands.put(("lyric", value, progress, list(solutions or [])))
-                append_pafplayer_trace("lyrics.cue", text=value[:500], length=len(value), emojimax=use_emoji)
+                self._commands.put(("lyric", artwork_value, floating_value, progress, list(artwork_solutions or []), list(floating_solutions or [])))
+                append_pafplayer_trace("lyrics.cue", text=artwork_value[:500], length=len(artwork_value), emojimax=use_emoji)
             else:
                 self._commands.put(("lyric-progress", progress))
 
-    def update_karaoke_frame(self, frame: KaraokeFrame, *, emojimax: bool = False) -> None:
-        """Consume the same semantic KaraokeFrame used by console/web surfaces."""
-        self.update_lyric(frame.title_text, frame.emphasis_progress, emojimax=emojimax)
+    def update_karaoke_frame(
+        self, frame: KaraokeFrame, *, emojimax: bool = False,
+        decensor_artwork: bool = False, decensor_floating: bool = False,
+    ) -> None:
+        """Consume shared timing while allowing each Tk lyric surface its own text transform."""
+        self.update_lyric(
+            frame.title_text, frame.emphasis_progress, emojimax=emojimax,
+            decensor_artwork=decensor_artwork, decensor_floating=decensor_floating,
+        )
 
     def consume_terminal_redraw_request(self) -> bool:
         """Return and clear the GUI's request for one owner-thread HUD repaint."""
@@ -31716,6 +33477,11 @@ class ExternalAlbumArtWindow:
             return False
         self._terminal_redraw_requested.clear()
         return True
+
+    def set_playback_running(self, running: bool) -> None:
+        """Tell the artwork GUI whether music is actively advancing right now."""
+        with self._lock:
+            self._playback_running = bool(running)
 
     def start_idle_routine(self) -> bool:
         """Immediately start the idle-art dance from a focus-only player command.
@@ -31729,7 +33495,7 @@ class ExternalAlbumArtWindow:
         after a short key-release grace period.
         """
         with self._lock:
-            if self._closed:
+            if self._closed or not self._playback_running:
                 return False
             self._enabled = True
             captured = windows_foreground_window_rect()
@@ -31902,12 +33668,17 @@ class ExternalAlbumArtWindow:
             "web_url": self._web_url,
             "track_identity": self._track_identity,
             "lyric": self._current_lyric,
+            "lyric_artwork": self._current_lyric_artwork,
+            "lyric_floating": self._current_lyric_floating,
+            "lyric_solutions_artwork": [],
+            "lyric_solutions_floating": [],
             "lyric_progress": self._current_lyric_progress,
             "popup_emojimax_enabled": self._popup_emojimax_enabled,
             "popup_color_emoji_enabled": self._popup_color_emoji_enabled,
             "popup_emojimax_button": None,
             "popup_emoji_font_button": None,
             "lyrics_mode": load_external_album_art_lyrics_mode(),
+            "artwork_karaoke_enabled": load_external_album_art_karaoke_enabled(),
             "lyric_font_scale": load_external_album_art_lyric_font_scale(),
             "karaoke_color_mode": load_external_album_art_karaoke_startup_color_mode(),
             "karaoke_color_favorites": load_external_album_art_karaoke_color_favorites(),
@@ -32058,6 +33829,16 @@ class ExternalAlbumArtWindow:
             "native_border_after": None,
             "native_border_region_key": None,
             "native_border_style_hwnd": 0,
+            # V311: freeze canvas work while Windows owns a native move/resize loop.
+            "art_move_resize_active": False,
+            "art_move_resize_render_pending": False,
+            "art_move_resize_watch_after": None,
+            "art_wndproc": None,
+            "art_original_wndproc": None,
+            "art_wndproc_hwnd": 0,
+            # Invalid slideshow targets stay in the source list for stable indices,
+            # but automatic rotation will not retry the same bad bytes forever.
+            "bad_art_variant_digests": set(),
         }
 
         def restore_console_focus_after_initialization() -> None:
@@ -32277,6 +34058,17 @@ class ExternalAlbumArtWindow:
                 return root.focus_displayof() is not None
             return False
 
+        def set_native_focus_chrome(active: bool) -> None:
+            """Maintain focus-only artwork chrome without changing HWND styles.
+
+            Toggling ``overrideredirect`` on a focused Tk toplevel can itself
+            cause WM focus changes, which then toggles the style back again. On
+            a monitor seam that becomes an endless clamp/focus bounce. The outer
+            native style therefore remains stable; the transparent wrapper below
+            is the focus-only border users see.
+            """
+            state["native_focus_borderless"] = not bool(active)
+
         def apply_focus_chrome() -> None:
             """Show exactly one OUTER five-pixel art border only while focused.
 
@@ -32286,6 +34078,7 @@ class ExternalAlbumArtWindow:
             """
             active = bool(window_is_active())
             state["window_active"] = active
+            set_native_focus_chrome(active)
             border_color = "#909090" if active else art_transparent
             border_frame = state.get("art_border_frame")
             if border_frame is not None:
@@ -32303,6 +34096,7 @@ class ExternalAlbumArtWindow:
         def hide_focus_chrome_immediately(_event=None) -> None:
             """FocusOut itself removes the five-pixel border immediately."""
             state["window_active"] = False
+            set_native_focus_chrome(False)
             border_frame = state.get("art_border_frame")
             if border_frame is not None:
                 with contextlib.suppress(Exception):
@@ -32575,7 +34369,7 @@ class ExternalAlbumArtWindow:
             except Exception:
                 return
 
-            lyric = str(state.get("lyric") or "").strip()
+            lyric = str(state.get("lyric_floating") or state.get("lyric") or "").strip()
             if not lyric:
                 old_item = state.get("floating_lyric_item")
                 if old_item is not None:
@@ -32609,7 +34403,7 @@ class ExternalAlbumArtWindow:
                 )
                 mask, origin, shadow, fitted_text, fitted_font, emoji_overlay = build_floating_lyric_mask(width, height, lyric)
                 state["floating_solution_boxes"] = _pillow_solution_boxes(
-                    fitted_text, fitted_font, origin, mask.size, state.get("lyric_solutions") or [],
+                    fitted_text, fitted_font, origin, mask.size, state.get("lyric_solutions_floating") or state.get("lyric_solutions") or [],
                     justification=str(state.get("floating_justification") or "center"),
                 )
                 phase = (time.monotonic() / 2.7) * speed
@@ -33801,19 +35595,28 @@ class ExternalAlbumArtWindow:
 
         def _restyle_popup_current_lyric() -> None:
             with self._lock:
-                source = self._current_lyric_source
+                artwork_source = self._current_lyric_source_artwork
+                floating_source = self._current_lyric_source_floating
                 upstream = bool(self._current_lyric_upstream_emojimax)
             use_emoji = bool(upstream and state.get("popup_emojimax_enabled", True))
             monochrome_safe = not bool(state.get("popup_color_emoji_enabled", False))
-            value = stylize_karaoke_with_emojimax(source, 1, use_emoji, 1.0, force_emoji_when_enabled=True, monochrome_safe=monochrome_safe) if source else ""
-            _plain, solutions = emojimax_plain_with_solutions(source, use_emoji, monochrome_safe=monochrome_safe)
+            artwork_value = stylize_karaoke_with_emojimax(artwork_source, 1, use_emoji, 1.0, force_emoji_when_enabled=True, monochrome_safe=monochrome_safe) if artwork_source else ""
+            floating_value = stylize_karaoke_with_emojimax(floating_source, 1, use_emoji, 1.0, force_emoji_when_enabled=True, monochrome_safe=monochrome_safe) if floating_source else ""
+            _plain, artwork_solutions = emojimax_plain_with_solutions(artwork_source, use_emoji, monochrome_safe=monochrome_safe)
+            _plain, floating_solutions = emojimax_plain_with_solutions(floating_source, use_emoji, monochrome_safe=monochrome_safe)
             with self._lock:
                 self._popup_emojimax_enabled = bool(state.get("popup_emojimax_enabled", True))
                 self._popup_color_emoji_enabled = bool(state.get("popup_color_emoji_enabled", False))
-                self._current_lyric = value
+                self._current_lyric = artwork_value
+                self._current_lyric_artwork = artwork_value
+                self._current_lyric_floating = floating_value
                 self._current_lyric_emojimax = use_emoji
-            state["lyric"] = value
-            state["lyric_solutions"] = solutions
+            state["lyric"] = artwork_value
+            state["lyric_artwork"] = artwork_value
+            state["lyric_floating"] = floating_value
+            state["lyric_solutions"] = artwork_solutions
+            state["lyric_solutions_artwork"] = artwork_solutions
+            state["lyric_solutions_floating"] = floating_solutions
             with contextlib.suppress(Exception): render_floating_lyric()
             with contextlib.suppress(Exception): redraw_artwork_lyric_layer()
 
@@ -34290,6 +36093,13 @@ class ExternalAlbumArtWindow:
 
         def _pillow_char_is_emojiish(ch: str, next_ch: str = "") -> bool:
             if not ch: return False
+            # Emojimaxx circled numbers are deliberate text symbols, not pictorial
+            # emoji.  Segoe UI Emoji renders U+2776 as a huge purple keycap-like
+            # disc, which destroys the fitted karaoke line and makes ❶ look like
+            # an unrelated icon. Keep the whole circled-number family in the
+            # primary lyric font.
+            if ch in CIRCLED_NUMBER_GLYPHS:
+                return False
             cp=ord(ch); nxt=ord(next_ch) if next_ch else -1
             return bool(0x1F000<=cp<=0x1FAFF or 0x1FC00<=cp<=0x1FFFF or 0x2600<=cp<=0x27FF or 0x2190<=cp<=0x21FF or 0x2300<=cp<=0x23FF or 0x2B00<=cp<=0x2BFF or 0x1F1E6<=cp<=0x1F1FF or 0x1F3FB<=cp<=0x1F3FF or cp in {0x00A9,0x00AE,0x2122,0x200D,0x20E3,0xFE0E,0xFE0F} or nxt in {0x20E3,0xFE0F})
 
@@ -35529,8 +37339,12 @@ class ExternalAlbumArtWindow:
                 self._color_configurator_target = None
                 with self._lock:
                     latest_lyric = self._current_lyric
+                    latest_artwork_lyric = self._current_lyric_artwork
+                    latest_floating_lyric = self._current_lyric_floating
                     latest_progress = self._current_lyric_progress
                 state["lyric"] = latest_lyric
+                state["lyric_artwork"] = latest_artwork_lyric
+                state["lyric_floating"] = latest_floating_lyric
                 state["lyric_progress"] = latest_progress
                 with contextlib.suppress(Exception):
                     config.destroy()
@@ -35832,9 +37646,9 @@ class ExternalAlbumArtWindow:
             state["artwork_lyric_plasma_mask"] = None
             state["artwork_lyric_plasma_origin"] = None
             state["artwork_solution_boxes"] = []
-            if not lyrics_mode_includes_artwork(int(state.get("lyrics_mode", 0) or 0)):
+            if not lyrics_mode_includes_artwork(int(state.get("lyrics_mode", 0) or 0)) or not bool(state.get("artwork_karaoke_enabled", True)):
                 return
-            lyric = str(state.get("lyric") or "").strip()
+            lyric = str(state.get("lyric_artwork") or state.get("lyric") or "").strip()
             if not lyric:
                 return
 
@@ -35852,7 +37666,7 @@ class ExternalAlbumArtWindow:
                 try:
                     from PIL import Image, ImageTk  # type: ignore
                     mask, origin, shadow, fitted_text, fitted_font, emoji_overlay = build_artwork_plasma_mask(width, height, lyric)
-                    state["artwork_solution_boxes"] = _pillow_solution_boxes(fitted_text, fitted_font, origin, mask.size, state.get("lyric_solutions") or [])
+                    state["artwork_solution_boxes"] = _pillow_solution_boxes(fitted_text, fitted_font, origin, mask.size, state.get("lyric_solutions_artwork") or state.get("lyric_solutions") or [])
                     phase = (time.monotonic() / 2.7) * speed
                     rgba = pattern_rgba_for_mask(
                         mask, shadow, phase, mode, palette_index,
@@ -35962,6 +37776,9 @@ class ExternalAlbumArtWindow:
 
         def redraw_artwork_lyric_layer() -> None:
             """Replace only lyric glyph/image items, leaving the cached cover untouched."""
+            if bool(state.get("art_move_resize_active")):
+                state["art_move_resize_render_pending"] = True
+                return
             with contextlib.suppress(Exception):
                 canvas.delete("artwork-lyric-shadow")
                 canvas.delete("artwork-lyric-color")
@@ -35980,7 +37797,14 @@ class ExternalAlbumArtWindow:
         def animate_artwork_lyric_colors() -> None:
             """Animate only the over-art lyric layer, yielding to startup/configurator work."""
             state["artwork_lyric_color_after"] = None
-            if not lyrics_mode_includes_artwork(int(state.get("lyrics_mode", 0) or 0)):
+            if bool(state.get("art_move_resize_active")):
+                # Windows is compositing the existing client bitmap while the user
+                # drags/resizes.  Do not mutate Tk image/glyph objects underneath it.
+                state["art_move_resize_render_pending"] = True
+                with contextlib.suppress(Exception):
+                    state["artwork_lyric_color_after"] = root.after(120, animate_artwork_lyric_colors)
+                return
+            if not lyrics_mode_includes_artwork(int(state.get("lyrics_mode", 0) or 0)) or not bool(state.get("artwork_karaoke_enabled", True)):
                 return
             if self._color_configurator_active.is_set():
                 return
@@ -36064,6 +37888,12 @@ class ExternalAlbumArtWindow:
         def render_art() -> None:
             """Render the main artwork, including Pillow-backed non-idle crossfades."""
             state["resize_after"] = None
+            if bool(state.get("art_move_resize_active")):
+                # Keep the exact already-painted client bitmap while the user moves
+                # or sizes the native popup.  Any requested update is coalesced and
+                # rendered once immediately after WM_EXITSIZEMOVE.
+                state["art_move_resize_render_pending"] = True
+                return
             width = max(1, canvas.winfo_width())
             height = max(1, canvas.winfo_height())
             data = state.get("art_bytes")
@@ -36137,11 +37967,28 @@ class ExternalAlbumArtWindow:
                     # own aspect ratio and ordinary cached Pillow source.
                     canvas.delete("all")
                 except Exception as exc:
+                    failed_target = state.get("crossfade_to_bytes")
+                    failed_index = state.get("crossfade_to_index")
+                    if isinstance(failed_target, (bytes, bytearray)) and failed_target:
+                        digest = hashlib.sha256(bytes(failed_target)).hexdigest()[:16]
+                        bad = state.get("bad_art_variant_digests")
+                        if isinstance(bad, set):
+                            bad.add(digest)
+                        detail = (
+                            f"variant={failed_index!r} bytes={len(failed_target)} "
+                            f"sha256={digest} magic={bytes(failed_target)[:12].hex()}"
+                        )
+                    else:
+                        detail = f"variant={failed_index!r} target=missing"
                     record_pafplayer_runtime_warning(
                         f"Artwork crossfade failed: {type(exc).__name__}: {exc}",
-                        "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+                        detail + "\n" + "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
                     )
-                    _cancel_crossfade(commit_target=True)
+                    # A target that just failed decoding is never authoritative.
+                    # Keep the previous known-good art instead of causing a second
+                    # immediate decode failure in the ordinary renderer.
+                    _cancel_crossfade(commit_target=False)
+                    state["next_rotation_at"] = time.monotonic() + EXTERNAL_ALBUM_ART_ROTATE_SECONDS
                     data = state.get("art_bytes")
             else:
                 canvas.delete("all")
@@ -36285,7 +38132,75 @@ class ExternalAlbumArtWindow:
             if prior is not None:
                 with contextlib.suppress(Exception):
                     root.after_cancel(prior)
+            state["resize_after"] = None
+            if bool(state.get("art_move_resize_active")):
+                state["art_move_resize_render_pending"] = True
+                return
             state["resize_after"] = root.after(60, render_art)
+
+        def install_art_move_resize_guard() -> None:
+            """Freeze Tk canvas work during the native Windows move/size modal loop."""
+            if os.name != "nt" or state.get("art_wndproc") is not None:
+                return
+            try:
+                import ctypes
+                from ctypes import wintypes
+                hwnd = int(state.get("native_hwnd", 0) or 0)
+                if not hwnd:
+                    return
+                user32 = ctypes.windll.user32
+                get_long = user32.GetWindowLongPtrW
+                set_long = user32.SetWindowLongPtrW
+                call_proc = user32.CallWindowProcW
+                get_long.argtypes = [wintypes.HWND, ctypes.c_int]
+                get_long.restype = ctypes.c_void_p
+                set_long.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_void_p]
+                set_long.restype = ctypes.c_void_p
+                call_proc.argtypes = [ctypes.c_void_p, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+                call_proc.restype = ctypes.c_ssize_t
+                original_value = int(get_long(wintypes.HWND(hwnd), -4) or 0)
+                if not original_value:
+                    return
+                original_proc = ctypes.c_void_p(original_value)
+                wndproc_type = ctypes.WINFUNCTYPE(
+                    ctypes.c_ssize_t, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM
+                )
+
+                @wndproc_type
+                def art_wndproc(callback_hwnd, message, wparam, lparam):
+                    try:
+                        msg = int(message)
+                        if msg == 0x0231:  # WM_ENTERSIZEMOVE
+                            state["art_move_resize_active"] = True
+                            state["art_move_resize_render_pending"] = True
+                        elif msg == 0x0232:  # WM_EXITSIZEMOVE
+                            state["art_move_resize_active"] = False
+                            state["art_move_resize_render_pending"] = True
+                        return int(call_proc(original_proc, callback_hwnd, message, wparam, lparam))
+                    except Exception:
+                        with contextlib.suppress(Exception):
+                            return int(call_proc(original_proc, callback_hwnd, message, wparam, lparam))
+                        return 0
+
+                set_long(wintypes.HWND(hwnd), -4, ctypes.cast(art_wndproc, ctypes.c_void_p))
+                state["art_wndproc_hwnd"] = hwnd
+                state["art_original_wndproc"] = original_proc
+                state["art_wndproc"] = art_wndproc
+            except Exception as exc:
+                record_pafplayer_runtime_warning(
+                    f"Album-art move/resize guard setup failed: {type(exc).__name__}: {exc}",
+                    "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+                )
+
+        def art_move_resize_watch() -> None:
+            """Coalesce every deferred art/lyric update into one post-drag repaint."""
+            state["art_move_resize_watch_after"] = None
+            if not bool(state.get("art_move_resize_active")) and bool(state.get("art_move_resize_render_pending")):
+                state["art_move_resize_render_pending"] = False
+                schedule_render()
+                ensure_artwork_lyric_color_animation()
+            with contextlib.suppress(Exception):
+                state["art_move_resize_watch_after"] = root.after(50, art_move_resize_watch)
 
         def on_configure(event) -> None:
             if event.widget is not root:
@@ -36373,6 +38288,8 @@ class ExternalAlbumArtWindow:
             schedule_render()
 
         root.bind("<Configure>", on_configure)
+        root.after(0, install_art_move_resize_guard)
+        state["art_move_resize_watch_after"] = root.after(50, art_move_resize_watch)
 
         def update_window_title() -> None:
             variants = state.get("variants")
@@ -36422,6 +38339,31 @@ class ExternalAlbumArtWindow:
                 return
             current_data = state.get("art_bytes")
             target_data = variants[index]
+            if not isinstance(target_data, (bytes, bytearray)) or not target_data:
+                state["next_rotation_at"] = time.monotonic() + EXTERNAL_ALBUM_ART_ROTATE_SECONDS
+                return
+            target_digest = hashlib.sha256(bytes(target_data)).hexdigest()[:16]
+            bad = state.get("bad_art_variant_digests")
+            if isinstance(bad, set) and target_digest in bad:
+                state["next_rotation_at"] = time.monotonic() + EXTERNAL_ALBUM_ART_ROTATE_SECONDS
+                return
+            # Validate the target before initiating a fade.  This prevents invalid
+            # embedded/sidecar bytes from replacing a perfectly good current cover.
+            try:
+                from PIL import Image  # type: ignore
+                with Image.open(io.BytesIO(bytes(target_data))) as candidate:
+                    candidate.verify()
+            except Exception as exc:
+                if isinstance(bad, set):
+                    bad.add(target_digest)
+                record_pafplayer_runtime_warning(
+                    f"Album art variant skipped: {type(exc).__name__}: {exc}",
+                    f"variant={index} bytes={len(target_data)} sha256={target_digest} "
+                    f"magic={bytes(target_data)[:12].hex()}\n"
+                    + "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+                )
+                state["next_rotation_at"] = time.monotonic() + EXTERNAL_ALBUM_ART_ROTATE_SECONDS
+                return
             if not isinstance(current_data, (bytes, bytearray)) or not current_data:
                 select_art_variant(index)
                 return
@@ -36444,13 +38386,29 @@ class ExternalAlbumArtWindow:
                 if (
                     self.enabled
                     and not bool(state.get("idle_promoted"))
+                    and not bool(state.get("art_move_resize_active"))
                     and isinstance(variants, list)
                     and len(variants) > 1
                     and time.monotonic() >= float(state.get("next_rotation_at", 0.0) or 0.0)
                 ):
                     weights = external_album_art_rotation_weights(len(variants))
-                    chosen = random.choices(range(len(variants)), weights=weights, k=1)[0]
-                    crossfade_to_variant(chosen)
+                    bad = state.get("bad_art_variant_digests")
+                    candidates = []
+                    candidate_weights = []
+                    for variant_index, variant in enumerate(variants):
+                        digest = (
+                            hashlib.sha256(bytes(variant)).hexdigest()[:16]
+                            if isinstance(variant, (bytes, bytearray)) and variant else ""
+                        )
+                        if isinstance(bad, set) and digest and digest in bad:
+                            continue
+                        candidates.append(variant_index)
+                        candidate_weights.append(weights[variant_index])
+                    if candidates:
+                        chosen = random.choices(candidates, weights=candidate_weights, k=1)[0]
+                        crossfade_to_variant(chosen)
+                    else:
+                        state["next_rotation_at"] = time.monotonic() + EXTERNAL_ALBUM_ART_ROTATE_SECONDS
                 root.after(250, art_rotation_watch)
             except Exception:
                 with contextlib.suppress(Exception):
@@ -36532,7 +38490,7 @@ class ExternalAlbumArtWindow:
 
         def artwork_lyric_click_reveals_floating(event) -> bool:
             """Clicking a visible over-art lyric raises the enabled floating lyric window."""
-            if not str(state.get("lyric") or "").strip():
+            if not str(state.get("lyric_artwork") or state.get("lyric") or "").strip():
                 return False
             if not lyrics_mode_includes_floating(int(state.get("lyrics_mode", 0) or 0)):
                 return False
@@ -37284,6 +39242,13 @@ class ExternalAlbumArtWindow:
             """
             threshold = float(self._idle_foreground_seconds)
             now = time.monotonic()
+            with self._lock:
+                playback_running = bool(self._playback_running)
+            if not playback_running:
+                if bool(state.get("idle_promoted")):
+                    end_idle_art_routine()
+                root.after(EXTERNAL_ALBUM_ART_IDLE_DRIFT_INTERVAL_MS, idle_art_watch)
+                return
 
             manual_active = bool(state.get("manual_idle_active"))
             if manual_active and now >= float(state.get("manual_idle_arm_at", 0.0) or 0.0):
@@ -37387,20 +39352,51 @@ class ExternalAlbumArtWindow:
                         save_external_album_art_lyrics_mode(new_mode)
                         apply_lyrics_mode()
                         continue
+                    if kind == "show-karaoke-color-configurator":
+                        _kind, target = command
+                        if target == "floating":
+                            show_floating_karaoke_color_configurator()
+                        else:
+                            show_artwork_karaoke_color_configurator()
+                        continue
+                    if kind == "set-lyrics-mode":
+                        _kind, requested_mode = command
+                        state["lyrics_mode"] = max(0, min(2, int(requested_mode)))
+                        save_external_album_art_lyrics_mode(state["lyrics_mode"])
+                        apply_lyrics_mode()
+                        continue
+                    if kind == "set-artwork-karaoke-enabled":
+                        _kind, enabled = command
+                        state["artwork_karaoke_enabled"] = bool(enabled)
+                        save_external_album_art_karaoke_enabled(state["artwork_karaoke_enabled"])
+                        if not state["artwork_karaoke_enabled"]:
+                            state["lyric_artwork"] = ""
+                            state["artwork_lyric_color_items"] = []
+                            state["artwork_lyric_plasma_item"] = None
+                        redraw_artwork_lyric_layer()
+                        continue
                     if kind == "lyric":
-                        _kind, lyric, progress, *solution_payload = command
-                        state["lyric"] = str(lyric or "").strip()
-                        state["lyric_solutions"] = list(solution_payload[0]) if solution_payload and isinstance(solution_payload[0], list) else []
+                        _kind, artwork_lyric, floating_lyric, progress, *solution_payload = command
+                        state["lyric"] = str(artwork_lyric or "").strip()
+                        state["lyric_artwork"] = str(artwork_lyric or "").strip()
+                        state["lyric_floating"] = str(floating_lyric or "").strip()
+                        state["lyric_solutions_artwork"] = list(solution_payload[0]) if len(solution_payload) > 0 and isinstance(solution_payload[0], list) else []
+                        state["lyric_solutions_floating"] = list(solution_payload[1]) if len(solution_payload) > 1 and isinstance(solution_payload[1], list) else []
+                        state["lyric_solutions"] = state["lyric_solutions_artwork"]
                         state["lyric_progress"] = max(0.0, min(1.0, float(progress)))
                         lyric_mode = int(state.get("lyrics_mode", 0) or 0)
                         if (
                             lyrics_mode_includes_artwork(lyric_mode)
+                            and bool(state.get("artwork_karaoke_enabled", True))
                             and not self._color_configurator_active.is_set()
                         ):
                             redraw_artwork_lyric_layer()
                         if lyrics_mode_includes_floating(lyric_mode):
                             ensure_floating_lyrics_window()
-                            schedule_floating_render()
+                            # Commit the same cue immediately as the popup layer;
+                            # the deferred 40 ms resize render made floating lyrics
+                            # visibly switch one frame after artwork karaoke.
+                            render_floating_lyric()
                             ensure_floating_color_animation()
                         continue
                     if kind == "lyric-progress":
@@ -37577,6 +39573,7 @@ class ExternalAlbumArtWindow:
                 "color_config_hero_after",
                 "color_config_rows_after",
                 "native_border_after",
+                "art_move_resize_watch_after",
             ):
                 after_id = state.get(after_key)
                 if after_id is not None:
@@ -37594,6 +39591,18 @@ class ExternalAlbumArtWindow:
                     state[after_key] = None
                 with contextlib.suppress(Exception):
                     save_floating_geometry_now()
+
+            # Restore the main artwork WNDPROC before destroying the root; the
+            # Python WM_ENTERSIZEMOVE callback must never outlive its HWND.
+            if os.name == "nt" and state.get("art_original_wndproc"):
+                with contextlib.suppress(Exception):
+                    import ctypes
+                    ctypes.windll.user32.SetWindowLongPtrW(
+                        int(state.get("art_wndproc_hwnd", 0) or 0),
+                        -4,
+                        state["art_original_wndproc"],
+                    )
+            state["art_wndproc"] = None
 
             # Restore the Tk window procedure before destroying the transparent
             # floating window; a Python callback must never outlive its HWND.
@@ -37782,11 +39791,33 @@ def mosaic_web_art_bytes(images: list[bytes], *, checkerboard: bool = False) -> 
         return images[0]
 
 
-def extract_album_art_variants(
+class _AlbumArtVariantsFlight:
+    """One transient shared result for simultaneous artwork-variant requests."""
+
+    def __init__(self) -> None:
+        self.ready = threading.Event()
+        self.result: tuple[bytes, ...] = tuple()
+        self.error: BaseException | None = None
+
+
+_ALBUM_ART_VARIANTS_FLIGHT_LOCK = threading.Lock()
+_ALBUM_ART_VARIANTS_INFLIGHT: dict[tuple[str, int, int, int], _AlbumArtVariantsFlight] = {}
+
+
+def _album_art_variants_flight_key(audio_path: Path, limit: int) -> tuple[str, int, int, int]:
+    """Identify a transient extraction without retaining artwork after it finishes."""
+    try:
+        stat = audio_path.stat()
+        return str(audio_path.resolve()), stat.st_mtime_ns, stat.st_size, limit
+    except OSError:
+        return str(audio_path), 0, 0, limit
+
+
+def _extract_album_art_variants_uncached(
     audio_path: Path,
     limit: int = ALBUM_ART_PREVIEW_MAX_IMAGES,
 ) -> list[bytes]:
-    """Return relevant artwork, suppressing exact and near-visual duplicates."""
+    """Perform one artwork scan, suppressing exact and near-visual duplicates."""
     variants: list[bytes] = []
     raw_hashes: set[bytes] = set()
     fingerprints: list[tuple[int, int, tuple[int, int, int], tuple[int, ...]] | None] = []
@@ -37831,6 +39862,46 @@ def extract_album_art_variants(
         if len(variants) >= limit:
             break
     return variants[:limit]
+
+
+def extract_album_art_variants(
+    audio_path: Path,
+    limit: int = ALBUM_ART_PREVIEW_MAX_IMAGES,
+) -> list[bytes]:
+    """Return artwork variants, sharing work among simultaneous track consumers.
+
+    The web page, external-art window, console artwork grid, and availability
+    probe can all request the same track at once.  V311 made every caller repeat
+    file reads, SHA-256 hashing, Pillow decoding, and perceptual fingerprints.
+    This is deliberately a *single-flight*, not a persistent image cache: once
+    the concurrent callers receive a fresh list, the shared bytes are released.
+    """
+    key = _album_art_variants_flight_key(audio_path, limit)
+    with _ALBUM_ART_VARIANTS_FLIGHT_LOCK:
+        flight = _ALBUM_ART_VARIANTS_INFLIGHT.get(key)
+        owner = flight is None
+        if flight is None:
+            flight = _AlbumArtVariantsFlight()
+            _ALBUM_ART_VARIANTS_INFLIGHT[key] = flight
+
+    if not owner:
+        flight.ready.wait()
+        if flight.error is not None:
+            raise flight.error
+        return list(flight.result)
+
+    try:
+        result = tuple(_extract_album_art_variants_uncached(audio_path, limit))
+        flight.result = result
+        return list(result)
+    except BaseException as exc:
+        flight.error = exc
+        raise
+    finally:
+        flight.ready.set()
+        with _ALBUM_ART_VARIANTS_FLIGHT_LOCK:
+            if _ALBUM_ART_VARIANTS_INFLIGHT.get(key) is flight:
+                _ALBUM_ART_VARIANTS_INFLIGHT.pop(key, None)
 
 
 def console_cursor_and_viewport_top() -> tuple[int, int] | None:
@@ -38440,7 +40511,19 @@ def play_audio_file(
     karaoke_style_state: list[int] | None = None,
     karaoke_treatment_state: list[int] | None = None,
     karaoke_emojimax_state: list[bool] | None = None,
+    decensor_console_karaoke_state: list[bool] | None = None,
+    decensor_artwork_lyrics_state: list[bool] | None = None,
+    decensor_floating_lyrics_state: list[bool] | None = None,
     console_karaoke_enabled_state: list[bool] | None = None,
+    alert_no_replaygain_state: list[bool] | None = None,
+    alert_missing_artist_state: list[bool] | None = None,
+    alert_missing_title_state: list[bool] | None = None,
+    alert_missing_karaoke_state: list[bool] | None = None,
+    alert_missing_lyrics_state: list[bool] | None = None,
+    alert_missing_artwork_state: list[bool] | None = None,
+    alert_unknown_year_state: list[bool] | None = None,
+    alert_unknown_genre_state: list[bool] | None = None,
+    alert_embedded_lyrics_mismatch_state: list[bool] | None = None,
     progress_style_state: list[int] | None = None,
     progress_bar_enabled_state: list[bool] | None = None,
     progress_beat_reactive_state: list[bool] | None = None,
@@ -38626,6 +40709,20 @@ def play_audio_file(
     duration = duration_probe(audio_path)
     audio_tags = probe_audio_tags(audio_path)
     replaygain_info = replaygain_probe(audio_path, replaygain_mode)                 # Resolve once per logical visit; every seek/restart below reuses this exact immutable gain decision.
+    audio_health_result: list[object | None] = [None]
+    audio_health_finished = threading.Event()
+    claire_audio_processing = find_clairecjs_dependency("claire_audio_processing")
+    if claire_audio_processing is not None:
+        def _resolve_audio_health() -> None:
+            try:
+                audio_health_result[0] = claire_audio_processing.inspect_audio_health(audio_path)
+            except Exception as exc:
+                append_pafplayer_exception(f"shared audio-health inspection for {audio_path}", exc)
+            finally:
+                audio_health_finished.set()
+        threading.Thread(target=_resolve_audio_health, name="audio-health-audit", daemon=True).start()
+    else:
+        audio_health_finished.set()
     playback_start, playback_end = detect_edge_silence_bounds(
         audio_path, duration,
         enabled=trim_edge_silence,
@@ -38870,6 +40967,19 @@ def play_audio_file(
     console_karaoke_enabled = (
         bool(console_karaoke_enabled_state[0]) if console_karaoke_enabled_state is not None else True
     )
+    alert_no_replaygain = bool(alert_no_replaygain_state[0]) if alert_no_replaygain_state is not None else True
+    alert_missing_artist = bool(alert_missing_artist_state[0]) if alert_missing_artist_state is not None else True
+    alert_missing_title = bool(alert_missing_title_state[0]) if alert_missing_title_state is not None else True
+    alert_missing_karaoke = bool(alert_missing_karaoke_state[0]) if alert_missing_karaoke_state is not None else False
+    alert_missing_lyrics = bool(alert_missing_lyrics_state[0]) if alert_missing_lyrics_state is not None else False
+    alert_missing_artwork = bool(alert_missing_artwork_state[0]) if alert_missing_artwork_state is not None else False
+    alert_unknown_year = bool(alert_unknown_year_state[0]) if alert_unknown_year_state is not None else False
+    alert_unknown_genre = bool(alert_unknown_genre_state[0]) if alert_unknown_genre_state is not None else False
+    alert_embedded_lyrics_mismatch = bool(alert_embedded_lyrics_mismatch_state[0]) if alert_embedded_lyrics_mismatch_state is not None else True
+    track_alert_details: list[str] = []
+    track_alerts_announced = False
+    replaygain_missing_continuous = False
+    learned_state = [audio_is_effectively_learned(audio_path)] if attribute_management_enabled else [False]
     progress_bar_enabled = (
         bool(progress_bar_enabled_state[0]) if progress_bar_enabled_state is not None else True
     )
@@ -39127,6 +41237,8 @@ def play_audio_file(
     drcs_has_space = drcs_rows > 0
     sixel_has_space = sixel_enabled
     last_lyric_index: int | None = None
+    last_console_sung_lyric: tuple[int, str] | None = None
+    console_gap_fade_started_position: float | None = None
     # V251: stale double-height karaoke rows can survive transitions where no
     # active lyric ever updates last_lyric_index. Track whether the reservation
     # has actually been blanked rather than inferring that from lyric identity.
@@ -39649,12 +41761,24 @@ def play_audio_file(
     karaoke_style = karaoke_style_state[0] if karaoke_style_state is not None else 1
     karaoke_treatment = karaoke_treatment_state[0] if karaoke_treatment_state is not None else 2
     karaoke_emojimax = karaoke_emojimax_state[0] if karaoke_emojimax_state is not None else False
+    decensor_console_karaoke = bool(decensor_console_karaoke_state[0]) if decensor_console_karaoke_state is not None else False
+    decensor_artwork_lyrics = bool(decensor_artwork_lyrics_state[0]) if decensor_artwork_lyrics_state is not None else False
+    decensor_floating_lyrics = bool(decensor_floating_lyrics_state[0]) if decensor_floating_lyrics_state is not None else False
     progress_style = progress_style_state[0] if progress_style_state is not None else 1
     fade_style = effective_player_defaults().get("BarFadeStyle", 1)
     last_visualizer_digit_at = -10.0
     last_volume_action: str | None = None
     last_volume_change_at = -10.0
     volume_repeat_count = 0
+    volume_blink_started_at = -10.0
+    last_volume_blink_phase = -1
+    volume_blink_rearm_on_playback_start = False
+    volume_feedback_box_started = 0.0
+    volume_feedback_box_until = 0.0
+    volume_feedback_box_text = ""
+    volume_feedback_box_was_visible = False
+    volume_feedback_box_last_fade_step = -1
+    interaction_feedback_ready_at = monotonic() + 4.0
 
     # V32 editor + attribute state. Attribute discovery deliberately starts last
     # and runs on a low-priority daemon so it cannot steal the visualizer's CPU.
@@ -39909,10 +42033,24 @@ def play_audio_file(
     header_paused = bool(initially_paused)
     prompt_paused_state = [bool(initially_paused)]
     startup_pause_pending = bool(initially_paused)
+    track_artwork_input_allowed = visualizer_track_artwork_allowed(
+        visualizer_input_source, bool(initially_paused)
+    )
 
     def sync_live_visualizer_capture(paused: bool) -> None:
-        nonlocal live_visualizer_capture
+        nonlocal live_visualizer_capture, track_artwork_input_allowed, last_sixel_refresh
         desired = live_visualizer_capture_mode(visualizer_input_source, paused)
+        artwork_allowed = desired == 0
+        if artwork_allowed != track_artwork_input_allowed:
+            # A SIXEL artwork layer can survive underneath unchanged DRCS cells.
+            # Erase the whole lyric/visualizer reservation and invalidate every
+            # delta cache exactly once at the source boundary.  The caller's
+            # immediate status repaint then owns all of those rows again.
+            if track_artwork_input_allowed and not artwork_allowed:
+                clear_region(LYRIC_ROW, max(1, LYRIC_ROWS + drcs_rows))
+            track_artwork_input_allowed = artwork_allowed
+            reset_visualizer_transport_cache()
+            last_sixel_refresh = -10.0
         # V259: Auto/PAFPlayer mode while PLAYING must be literally dormant.
         # Do not even allocate/query/update the WASAPI helper unless a live
         # source is actually requested.  If a prior paused capture exists, stop
@@ -40423,11 +42561,18 @@ def play_audio_file(
             + "\033[38;2;145;170;195m  ║  🔊 Out: " + output_rate_text + "\033[0m"
             + "\033[38;2;145;170;195m  ║  📂 Playlist: " + playlist_text + "\033[0m"
         )
+        track_alert_help_rows: list[str] = []
+        if replaygain_missing_continuous:
+            track_alert_help_rows.append("⚠ Continuous: no valid ReplayGain track gain/peak tag")
+        track_alert_help_rows.extend("⚠ " + item for item in track_alert_details)
+        if attribute_management_enabled:
+            track_alert_help_rows.append("🧠 Learned:" + ("Y" if learned_state[0] else "N") + "  (Alt+L toggles)")
 
         # Claire-specific attribute hotkeys disappear from help when the
         # ecosystem feature is disabled by source flag or command line.
         attribute_help_items = (
-            (("Ctrl+Alt+L", "🧠 learned; extras save only on Enter; R removes ~16s"),)
+            (("Alt+L", "🧠 toggle Learned:Y/N"),
+             ("Ctrl+Alt+L", "🧠 learned + optional extras; R removes ~16s"))
             if attribute_management_enabled else ()
         )
 
@@ -40456,7 +42601,7 @@ def play_audio_file(
                 (
                     ("</>", "⏮/⏭ track"),
                     ("{/}", "📁 previous/next folder"),
-                    ("R", "🔀 shuffle; avoids plays/visits <3h"),
+                    ("R", "🔀 shuffle/preorder playlist"),
                     ("A", "▶ autoplay"),
                     ("↑/↓", "volume ±5%"),
                     ("Shift+↑/↓", "volume ±20%"),
@@ -40575,6 +42720,7 @@ def play_audio_file(
             last_play_ansi,
             diagnostics_ansi,
             attribute_tags_ansi(available),
+            *["\033[38;2;220;175;105m" + row + "\033[0m" for row in track_alert_help_rows],
             "\033[38;2;85;195;185m" + divider_plain + "\033[0m",
         ]
         for group_index, ((key_rgb, separator_rgb, text_rgb), items) in enumerate(groups):
@@ -40649,8 +42795,9 @@ def play_audio_file(
         # Keep identity, Last play, Tags, diagnostics, then the divider immediately
         # above playback commands on every page.
         # rendered help genuinely exceeds the current terminal height.
-        masthead = rendered[:5]
-        body = rendered[5:]
+        masthead_rows = 5 + len(track_alert_help_rows)
+        masthead = rendered[:masthead_rows]
+        body = rendered[masthead_rows:]
         body_capacity = max(1, terminal_size.lines - len(masthead) - 1)
         pages = [
             body[index:index + body_capacity]
@@ -40675,13 +42822,68 @@ def play_audio_file(
             for index, line in enumerate(paginated[:overlay_rows])
         ) + "\033[?25l")
 
+    def start_interaction_visual_feedback(text: str, now_value: float) -> None:
+        """Arm the shared console-interaction overlay."""
+        nonlocal volume_feedback_box_started, volume_feedback_box_until, volume_feedback_box_text
+        # Suppress startup churn (initial settings/track reconstruction is not
+        # user feedback and used to produce competing PUOV boxes).
+        if now_value < interaction_feedback_ready_at:
+            return
+        volume_feedback_box_text = str(text).strip()
+        volume_feedback_box_started = now_value
+        volume_feedback_box_until = (
+            now_value + VOLUME_VISUALIZER_BOX_SECONDS
+            + INTERACTION_VISUALIZER_BOX_FADE_SECONDS
+        )
+
+    def start_volume_visual_feedback(
+        previous_volume: int, new_volume: int, now_value: float,
+    ) -> None:
+        """Arm inverse flashes, visualizer throb, and shared interaction overlay."""
+        nonlocal volume_direction, volume_blink_started_at, last_volume_blink_phase
+        volume_direction = "up" if new_volume >= previous_volume else "down"
+        volume_blink_started_at = now_value
+        last_volume_blink_phase = -1
+        delta = int(new_volume) - int(previous_volume)
+        start_interaction_visual_feedback(
+            f"{volume_level_emoji(new_volume)} {int(new_volume)}%  "
+            f"({delta:+d})",
+            now_value,
+        )
+
+    def interaction_feedback_label(action: str) -> str:
+        """Turn every user control action into a compact overlay label."""
+        raw = str(action or "").strip()
+        if raw == DISMISS_OVERLAY:
+            return ""
+        if raw == PAUSE_TOGGLE:
+            return "Pause"
+        if raw in {"web-set:art_color_autoslides_locked:0", "web-set:art_color_autoslides_locked:1"}:
+            return ""
+        if raw.startswith(WEB_SET_PREFIX):
+            payload = raw[len(WEB_SET_PREFIX):]
+            key, separator, value = payload.partition(":")
+            if separator:
+                return f"{key.replace('_', ' ').title()}: {value}"
+        if raw.startswith(WEB_FAVORITE_PREFIX):
+            return f"Favorite: {raw[len(WEB_FAVORITE_PREFIX):].replace('_', ' ').title()}"
+        if raw.startswith(WEB_DEFAULT_PREFIX):
+            return f"Default: {raw[len(WEB_DEFAULT_PREFIX):].replace('_', ' ').title()}"
+        if raw.startswith(WEB_SEEK_RATIO_PREFIX):
+            try:
+                return f"Seek: {float(raw[len(WEB_SEEK_RATIO_PREFIX):]) * 100:.0f}%"
+            except ValueError:
+                pass
+        return raw.replace("-", " ").replace("_", " ").strip().title()
+
     def change_volume(action: str, now: float) -> None:
         """Apply held-key acceleration while keeping volume within 0–400%."""
         nonlocal volume, volume_direction, last_volume_action
         nonlocal last_volume_change_at, volume_repeat_count
+        previous_volume = volume
         if action == VOLUME_RESET:
             volume = 100
-            volume_direction = "up"
+            start_volume_visual_feedback(previous_volume, volume, now)
             last_volume_action = action
             last_volume_change_at = now
             volume_repeat_count = 0
@@ -40697,7 +42899,7 @@ def play_audio_file(
         base_step = VOLUME_STEPS[action]
         multiplier = min(8, 1 + volume_repeat_count // 4)
         volume = min(400, max(0, volume + base_step * multiplier))
-        volume_direction = "up" if base_step > 0 else "down"
+        start_volume_visual_feedback(previous_volume, volume, now)
         if volume_state is not None:
             volume_state[0] = volume
 
@@ -40724,6 +42926,7 @@ def play_audio_file(
         nonlocal cached_visualizer_terminal_columns
         nonlocal lyric_transition_index, lyric_transition_started_at
         nonlocal progress_beat_last_time, progress_visualizer_levels
+        nonlocal last_console_sung_lyric, console_gap_fade_started_position
         if all_audio_tags_active:
             return
         # Theory 32 keeps the 120-Hz scheduler and calls show_status(), but
@@ -40759,15 +42962,50 @@ def play_audio_file(
         # and double-height karaoke own the full console width.
         visualizer_width = available_width
         karaoke_line_capacity = max(10, available_width // 2)
-        karaoke_frame = shared_karaoke_frame(current_position)
+        karaoke_frame = decensor_karaoke_frame(shared_karaoke_frame(current_position), decensor_console_karaoke)
         active_lyric = karaoke_frame.active if console_karaoke_enabled else None
+        gap_outgoing_lyric = False
+        if active_lyric is not None:
+            last_console_sung_lyric = (active_lyric[0], active_lyric[1])
+            console_gap_fade_started_position = None
+        elif console_karaoke_enabled and last_console_sung_lyric is not None:
+            if (
+                console_gap_fade_started_position is None
+                or current_position < console_gap_fade_started_position
+            ):
+                console_gap_fade_started_position = current_position
+            gap_elapsed = max(0.0, current_position - console_gap_fade_started_position)
+            gap_duration = max(0.001, LYRIC_PREVIOUS_FADE_MAX_SECONDS)
+            if gap_elapsed < gap_duration:
+                gap_outgoing_lyric = True
+                gap_brightness = LYRIC_PREVIOUS_MAX_BRIGHTNESS * (
+                    1.0 - gap_elapsed / gap_duration
+                )
+                active_lyric = (
+                    last_console_sung_lyric[0],
+                    last_console_sung_lyric[1],
+                    gap_brightness,
+                )
+            else:
+                last_console_sung_lyric = None
+                console_gap_fade_started_position = None
+        else:
+            last_console_sung_lyric = None
+            console_gap_fade_started_position = None
         extend_visualizer_through_karaoke = bool(
             karaoke_visualizer_height_mode in {1, 2, 3} and LYRIC_ROWS and not karaoke_visualizer_overlay
+        )
+        track_artwork_allowed = visualizer_track_artwork_allowed(
+            visualizer_input_source, bool(prompt_paused_state[0])
         )
         expand_visualizer_into_lyrics = bool(
             (karaoke_visualizer_expansion_enabled and LYRIC_ROWS and active_lyric is None and not karaoke_visualizer_overlay)
             or extend_visualizer_through_karaoke
-            or (LYRIC_ROWS and (ART_COLOR_VISUALIZER_KARAOKE_SIDES or ART_COLOR_VISUALIZER_KARAOKE))
+            or (
+                track_artwork_allowed
+                and LYRIC_ROWS
+                and (ART_COLOR_VISUALIZER_KARAOKE_SIDES or ART_COLOR_VISUALIZER_KARAOKE)
+            )
             or (LYRIC_ROWS and not console_karaoke_enabled)
         )
         # V299: karaoke paints its two physical halves with DEC #3/#4, which
@@ -40900,7 +43138,7 @@ def play_audio_file(
                 + (LYRIC_ROWS if expand_visualizer_into_lyrics else 0)
             )
             visualizer_art_rows = max(1, visualizer_source_rows - truncate_top_visualizer_lines)
-            if not album_art_visualizer_enabled or layered_art_visualizer_enabled:
+            if not album_art_visualizer_enabled or layered_art_visualizer_enabled or not track_artwork_allowed:
                 def visualizer_origin(target_row: int) -> str:
                     if minimal_visualizer_transport:
                         # Keep the saved-cursor restore only at the slow UI cadence:
@@ -40918,7 +43156,9 @@ def play_audio_file(
                 # Their only difference is how karaoke is composited afterward.
                 top_blank_by_logical_column: list[int] | None = (
                     [LYRIC_ROWS] * logical_visualizer_width
-                    if LYRIC_ROWS and (ART_COLOR_VISUALIZER_KARAOKE_SIDES or ART_COLOR_VISUALIZER_KARAOKE)
+                    if track_artwork_allowed
+                    and LYRIC_ROWS
+                    and (ART_COLOR_VISUALIZER_KARAOKE_SIDES or ART_COLOR_VISUALIZER_KARAOKE)
                     else None
                 )
                 # Artwork beneath karaoke is static for the track/geometry. Use
@@ -40931,6 +43171,7 @@ def play_audio_file(
                     or artwork_karaoke_static_rows
                     or (
                         not static_visualizer_repaint
+                        and track_artwork_allowed
                         and ART_COLOR_VISUALIZER_REPRESENTATION in {"blackness", "both"}
                         and ART_COLOR_VISUALIZER_BLACK_STRENGTH > 0
                     )
@@ -40963,26 +43204,34 @@ def play_audio_file(
                             str(audio_path), logical_visualizer_width, visualizer_art_rows,
                             2 if render_granularity in {2, 3} else 1,
                         )
-                        if ART_COLOR_VISUALIZER_REPRESENTATION in {"bars", "blackness", "both"} else None
+                        if track_artwork_allowed
+                        and ART_COLOR_VISUALIZER_REPRESENTATION in {"bars", "blackness", "both"}
+                        else None
                     ),
                     artwork_microtile_color_grid=(
                         album_art_visualizer_color_grid(
                             str(audio_path), logical_visualizer_width, visualizer_art_rows * 2, 2, 2
                         )
-                        if (drcs_art_microtiles or drcs_art_bar_microtiles)
+                        if track_artwork_allowed
+                        and (drcs_art_microtiles or drcs_art_bar_microtiles)
                         and render_granularity == 3
                         and ART_COLOR_VISUALIZER_REPRESENTATION in {"bars", "blackness", "both"}
                         else None
                     ),
-                    artwork_microtiles_enabled=drcs_art_microtiles,
-                    artwork_bar_microtiles_enabled=drcs_art_bar_microtiles,
+                    artwork_microtiles_enabled=bool(track_artwork_allowed and drcs_art_microtiles),
+                    artwork_bar_microtiles_enabled=bool(track_artwork_allowed and drcs_art_bar_microtiles),
                     artwork_bar_strength=(
                         effective_art_bar_strength
-                        if ART_COLOR_VISUALIZER_REPRESENTATION in {"bars", "both"} else 0.0
+                        if track_artwork_allowed
+                        and ART_COLOR_VISUALIZER_REPRESENTATION in {"bars", "both"}
+                        else 0.0
                     ),
+                    artwork_bar_blend_mode=ART_COLOR_VISUALIZER_BAR_BLEND_MODE,
                     artwork_background_strength=(
                         effective_art_black_strength
-                        if ART_COLOR_VISUALIZER_REPRESENTATION in {"blackness", "both"} else 0.0
+                        if track_artwork_allowed
+                        and ART_COLOR_VISUALIZER_REPRESENTATION in {"blackness", "both"}
+                        else 0.0
                     ),
                     color_heights_override=visualizer_color_heights,
                     color_energy_override=visualizer_color_energies,
@@ -40999,6 +43248,10 @@ def play_audio_file(
                         and not visualizer_force_full_frame
                         and not static_visualizer_repaint
                         and karaoke_visualizer_height_mode != 3
+                    ),
+                    feedback_brightness=volume_visualizer_brightness_factor(
+                        monotonic(), volume_blink_started_at, volume_direction,
+                        enabled=CONSOLE_VISUALIZER_VOLUME_FEEDBACK_ENABLED,
                     ),
                 )
                 if perf_render_started:
@@ -41171,7 +43424,93 @@ def play_audio_file(
                         last_visualizer_payload = visualizer_payload
                         visualizer_cursor_known_bottom = bool(relative_visualizer_rehome or minimal_visualizer_transport)
                         last_visualizer_row_count = visible_row_count
+        def paint_volume_feedback_box(now_value: float) -> None:
+            """Overlay cell-correct interaction feedback, then dither-fade it."""
+            nonlocal volume_feedback_box_was_visible, volume_feedback_box_last_fade_step
+            nonlocal visualizer_cursor_known_bottom
+            feedback_rows = max(3, int(last_visualizer_row_count or configured_visualizer_rows))
+            active = bool(
+                CONSOLE_VISUALIZER_VOLUME_FEEDBACK_ENABLED
+                and drcs_enabled
+                and volume_feedback_box_text
+                and now_value < volume_feedback_box_until
+                and visualizer_width >= 12
+                and feedback_rows - truncate_top_visualizer_lines >= 3
+            )
+            if not active:
+                if volume_feedback_box_was_visible:
+                    # The box bypasses the semantic/row caches. Invalidate once
+                    # so the next spectrum frame is guaranteed to erase it.
+                    reset_visualizer_transport_cache()
+                    volume_feedback_box_was_visible = False
+                    volume_feedback_box_last_fade_step = -1
+                return
+            rows = interaction_feedback_box_rows(volume_feedback_box_text, visualizer_width)
+            inner_width = terminal_cell_width(rows[0]) - 2
+            left = max(1, (visualizer_width - inner_width - 2) // 2 + 1)
+            visible_rows = max(3, feedback_rows - truncate_top_visualizer_lines)
+            # Derive the anchor directly; the renderer's local visualizer_row is
+            # intentionally not initialized on every lightweight status path.
+            feedback_row = LYRIC_ROW if expand_visualizer_into_lyrics else DRCS_ROW
+            top_row = feedback_row + max(0, (visible_rows - 3) // 2)
+            fade_started = volume_feedback_box_started + VOLUME_VISUALIZER_BOX_SECONDS
+            fade_fraction = max(0.0, min(
+                1.0,
+                (now_value - fade_started) / max(0.001, INTERACTION_VISUALIZER_BOX_FADE_SECONDS),
+            ))
+            if fade_fraction <= 0.0:
+                box = (
+                    "\033[?2026h\033(B\033[1;97;40m"
+                    + "".join(
+                        move_to(top_row + row_index) + f"\033[{left}G{row_text}"
+                        for row_index, row_text in enumerate(rows)
+                    )
+                    + "\033(B\033[0m\033[?25l\033[?2026l"
+                )
+            else:
+                # Sixteen stable dither phases progressively leave cells
+                # untouched, allowing the newly rendered spectrum beneath to
+                # replace the box instead of ending with a one-frame blink.
+                fade_step = min(16, max(1, math.ceil(fade_fraction * 16.0)))
+                if fade_step != volume_feedback_box_last_fade_step:
+                    reset_visualizer_transport_cache()
+                    volume_feedback_box_last_fade_step = fade_step
+                intensity = max(28, round(255 * (1.0 - fade_fraction)))
+                fragments: list[str] = [
+                    f"\033[?2026h\033(B\033[1;38;2;{intensity};{intensity};{intensity};48;2;0;0;0m"
+                ]
+                for row_index, row_text in enumerate(rows):
+                    run = ""
+                    run_start = 0
+                    cell = 0
+                    for character in row_text:
+                        character_cells = max(1, terminal_cell_width(character))
+                        threshold = ((cell * 5 + row_index * 7) % 16) + 1
+                        keep = threshold > fade_step
+                        if keep:
+                            if not run:
+                                run_start = cell
+                            run += character
+                        elif run:
+                            fragments.append(
+                                move_to(top_row + row_index)
+                                + f"\033[{left + run_start}G{run}"
+                            )
+                            run = ""
+                        cell += character_cells
+                    if run:
+                        fragments.append(
+                            move_to(top_row + row_index)
+                            + f"\033[{left + run_start}G{run}"
+                        )
+                fragments.append("\033(B\033[0m\033[?25l\033[?2026l")
+                box = "".join(fragments)
+            write_visualizer_console(box)
+            volume_feedback_box_was_visible = True
+            visualizer_cursor_known_bottom = False
+
         if visualizer_only:
+            paint_volume_feedback_box(monotonic())
             # Playback already owns a hidden cursor.  Do not issue an extra
             # terminal write on every 120-Hz visualizer tick, especially when
             # the rendered payload was identical and intentionally suppressed.
@@ -41346,8 +43685,6 @@ def play_audio_file(
                     """Center a lyric while respecting the selected spectrum composite mode."""
                     payload_capacity = line_capacity if capacity is None else max(1, capacity)
                     text = text.strip()
-                    if current and double_width and any(glyph in text for glyph in CIRCLED_NUMBER_GLYPHS):
-                        text = compensate_current_circled_number_spacing(text)
                     text_width = min(payload_capacity, terminal_cell_width(text))
                     remaining = max(0, payload_capacity - text_width)
                     left_padding = remaining // 2
@@ -41355,10 +43692,6 @@ def play_audio_file(
                     attributes = foreground_for(seed, brightness)
                     colored_text = colorize_karaoke_text(text, karaoke_treatment, seed, brightness)
                     multiplier = 2 if double_width else 1
-                    if double_width and not current and "❶" in text:
-                        colored_text = compensate_neighbor_circled_one_advance(
-                            text, colored_text
-                        )
 
                     if karaoke_visualizer_height_mode in {1, 2}:
                         # Modes 1 and 2 share the same full-height spectrum and
@@ -41435,6 +43768,7 @@ def play_audio_file(
                     styled = stylize_karaoke_with_emojimax(
                         text, karaoke_style, karaoke_emojimax, brightness,
                         fade_threshold_percent=emoji_threshold,
+                        windows_terminal_compat=windows_terminal_emojimax_spacing_enabled(),
                     )
                     # This is deliberately the full terminal width.  `line_capacity`
                     # is half-width because it is sized for DEC double-height lyrics;
@@ -41470,6 +43804,7 @@ def play_audio_file(
                         stylize_karaoke_with_emojimax(
                             text, karaoke_style, karaoke_emojimax, brightness,
                             fade_threshold_percent=emoji_threshold,
+                            windows_terminal_compat=windows_terminal_emojimax_spacing_enabled(),
                         )
                     )
                     if terminal_cell_width(styled) <= line_capacity:
@@ -41502,6 +43837,7 @@ def play_audio_file(
                             brightness,
                             force_emoji_when_enabled=current,
                             fade_threshold_percent=emoji_threshold,
+                            windows_terminal_compat=windows_terminal_emojimax_spacing_enabled(),
                         )
                     )
                     fitted = truncate_to_cells(styled, line_capacity, "…")
@@ -41517,6 +43853,14 @@ def play_audio_file(
                 next_entry = neighboring_entry(1)
                 previous_brightness = karaoke_frame.previous_brightness
                 next_brightness = karaoke_frame.next_brightness
+                if gap_outgoing_lyric:
+                    # During a real singing gap, promote the just-sung current
+                    # line into the previous/top band and let Emojimaxx's normal
+                    # fade threshold reveal its substitution before reclamation.
+                    previous_entry = (lyric_index, lyric_text)
+                    previous_brightness = opacity
+                    next_entry = None
+                    next_brightness = 0.0
                 prior_lyric_index = last_lyric_index
                 if prior_lyric_index is not None and lyric_index == prior_lyric_index + 1:
                     lyric_transition_index = lyric_index
@@ -41566,19 +43910,23 @@ def play_audio_file(
                             0, previous_entry, previous_brightness,
                             emoji_threshold=HIDE_PREVIOUS_EMOJI_WHEN_FADE_IS_UNDER_X_PERCENT,
                         )
-                    styled_current = compensate_double_height_cells(
-                        stylize_karaoke_with_emojimax(
-                            lyric_text,
-                            karaoke_style,
-                            karaoke_emojimax,
-                            opacity,
-                            force_emoji_when_enabled=True,
+                    if gap_outgoing_lyric:
+                        page: list[str] = []
+                    else:
+                        styled_current = compensate_double_height_cells(
+                            stylize_karaoke_with_emojimax(
+                                lyric_text,
+                                karaoke_style,
+                                karaoke_emojimax,
+                                opacity,
+                                force_emoji_when_enabled=True,
+                                windows_terminal_compat=windows_terminal_emojimax_spacing_enabled(),
+                            )
                         )
-                    )
-                    wrapped = wrap_to_cells(styled_current, line_capacity)
-                    pages = [wrapped[index:index + 2] for index in range(0, len(wrapped), 2)]
-                    cue_start = lyrics[lyric_index][0] if lyrics_are_timed else lyric_index * 4.0
-                    page = pages[min(len(pages) - 1, max(0, int((current_position - cue_start) // 4)))]
+                        wrapped = wrap_to_cells(styled_current, line_capacity)
+                        pages = [wrapped[index:index + 2] for index in range(0, len(wrapped), 2)]
+                        cue_start = lyrics[lyric_index][0] if lyrics_are_timed else lyric_index * 4.0
+                        page = pages[min(len(pages) - 1, max(0, int((current_position - cue_start) // 4)))]
                     # Fixed double-height bands: previous 0/1, current 2/3, next 4/5.
                     current_start_row = 2
                     for page_row, line in enumerate(page):
@@ -41609,6 +43957,7 @@ def play_audio_file(
             if karaoke_visualizer_height_mode == 3 and mode4_visualizer_overlay_payload:
                 write_visualizer_console(mode4_visualizer_overlay_payload)
                 visualizer_cursor_known_bottom = False
+            paint_volume_feedback_box(monotonic())
             write_console("\033[?25l")
             set_console_cursor_visible(False)
             if perf_karaoke_started:
@@ -41665,6 +44014,15 @@ def play_audio_file(
             "\033[1;5;38;2;255;220;55m⚠️\033[0m "
             if pafplayer_has_unacknowledged_runtime_warning() else ""
         )
+        replaygain_alert_indicator = (
+            "\033[1;97;41m 🚨 REPLAYGAIN TAG MISSING 🚨 \033[0m  "
+            if replaygain_missing_continuous else ""
+        )
+        learned_indicator = (
+            ("\033[38;2;86;174;116m𝓛\033[0m" if learned_state[0] else "\033[38;2;184;98;108m𝓛\033[0m")
+            + "  "
+            if attribute_management_enabled else ""
+        )
         available = max(12, shutil.get_terminal_size((120, 30)).columns - 1)
         show_speed_status = (
             PLAYBACK_SPEEDS[speed_index] != 1.0
@@ -41702,11 +44060,20 @@ def play_audio_file(
             f"\033[1;38;2;255;215;95m✏ {edit_prompt_text} — press D when done\033[0m  "
             if edit_prompt_text else ""
         )
+        volume_blink_phase = volume_inverse_blink_phase(
+            monotonic(), volume_blink_started_at,
+        )
+        volume_ansi = volume_status(
+            volume,
+            volume_direction,
+            inverse=volume_blink_phase in {0, 2, 4},
+        )
         controls = (
             bake_prompt + transient_prefix + karaoke_offset_status + fps_status + edit_notice + art_slide_status + processing_notice + color_notice + frequency_warp_notice + persistence_notice + granularity_notice + color_jump_notice
+            + replaygain_alert_indicator + learned_indicator
             + f"\033[2;90m  ?: " + runtime_warning_indicator
             + f"\033[38;2;175;175;185m{loop_glyph} {shuffle_glyph}\033[2;90m  "
-            f"{volume_status(volume, volume_direction)}\033[2;90m  "
+            f"{volume_ansi}\033[2;90m  "
             + speed_status
             + f"K:{KARAOKE_STYLE_NAMES[karaoke_style - 1]}/{KARAOKE_TREATMENT_NAMES[karaoke_treatment - 1]} E:{emoji_glyph} "
             f"V:{'+' if drcs_enabled else '-'} W:{sixel_glyph} "
@@ -41811,7 +44178,7 @@ def play_audio_file(
                 continue
             label = f"{style:02d} {PALETTE_NAMES[style - 1]}"
             label = truncate_to_cells(label, cell_width, "…")
-            title_cells.append(f"[1;97m{label}[0m" + " " * max(0, cell_width - terminal_cell_width(label)))
+            title_cells.append(f"\033[1;97m{label}\033[0m" + " " * max(0, cell_width - terminal_cell_width(label)))
         rendered_rows = [((" " * gap).join(title_cells))]
         for mock_row in range(8):
             row_cells: list[str] = []
@@ -41827,9 +44194,9 @@ def play_audio_file(
         overlay_rows = min(UI_ROWS, needed)
         clear_region(HEADER_ROW, overlay_rows)
         for index, row_text in enumerate(rendered_rows[:max(0, overlay_rows - 1)]):
-            write_console(move_to(HEADER_ROW + index) + BIG_OFF + truncate_ansi_to_cells(row_text, available) + "[K")
+            write_console(move_to(HEADER_ROW + index) + BIG_OFF + truncate_ansi_to_cells(row_text, available) + "\033[K")
         if overlay_rows:
-            write_console(move_to(HEADER_ROW + overlay_rows - 1) + "[2;90m" + truncate_to_cells(footer, available) + "[0m[K")
+            write_console(move_to(HEADER_ROW + overlay_rows - 1) + "\033[2;90m" + truncate_to_cells(footer, available) + "\033[0m\033[K")
 
     def set_color_style_direct(style: int, now_value: float) -> None:
         nonlocal color_style, color_notice_until, color_jump_until, color_jump_digits
@@ -41839,6 +44206,9 @@ def play_audio_file(
         color_notice_until = now_value + 3.0
         color_jump_until = 0.0
         color_jump_digits = ""
+        start_interaction_visual_feedback(
+            f"Palette: {PALETTE_NAMES[color_style - 1]}", now_value,
+        )
 
     def handle_color_selection_input(now_value: float, current_position: float, indicator_text: str) -> bool:
         """Consume the temporary C→digits / C→? modal color-selection input."""
@@ -42329,6 +44699,15 @@ def play_audio_file(
             "KaraokeEmojimax": int(karaoke_emojimax),
             "KaraokeOffsetTenths": int(round(KARAOKE_DISPLAY_OFFSET_SECONDS * 10.0)),
             "ConsoleKaraokeEnabled": int(console_karaoke_enabled),
+            "AlertNoReplayGain": int(alert_no_replaygain),
+            "AlertMissingArtist": int(alert_missing_artist),
+            "AlertMissingTitle": int(alert_missing_title),
+            "AlertMissingKaraoke": int(alert_missing_karaoke),
+            "AlertMissingLyrics": int(alert_missing_lyrics),
+            "AlertMissingArtwork": int(alert_missing_artwork),
+            "AlertUnknownYear": int(alert_unknown_year),
+            "AlertUnknownGenre": int(alert_unknown_genre),
+            "AlertEmbeddedLyricsMismatch": int(alert_embedded_lyrics_mismatch),
             "ProgressStyle": progress_style,
             "ProgressBarEnabled": int(progress_bar_enabled),
             "ProgressBeatReactive": int(progress_beat_reactive),
@@ -42355,6 +44734,7 @@ def play_audio_file(
     def apply_mode_settings(settings: dict[str, int]) -> None:
         nonlocal visualizer_mode, persistence_mode, visualizer_granularity, visualizer_input_source, processing_style, color_style, color_reverse, fade_style, frequency_warp_enabled, karaoke_style, karaoke_treatment
         nonlocal karaoke_emojimax, console_karaoke_enabled, progress_style, progress_bar_enabled, progress_beat_reactive, progress_beat_detector, progress_beat_treatment, cursive_fix, output_channels, output_rate, output_bit_depth, output_device_index, output_devices_mask_value, output_device_indexes, mm_inspired_renderer_enabled, balance
+        nonlocal alert_no_replaygain, alert_missing_artist, alert_missing_title, alert_missing_karaoke, alert_missing_lyrics, alert_missing_artwork, alert_unknown_year, alert_unknown_genre, alert_embedded_lyrics_mismatch, replaygain_missing_continuous
         nonlocal volume, speed_index, looping, drcs_enabled, sixel_enabled
         visualizer_mode = settings["VisualizerMode"]
         persistence_mode = settings.get("PersistenceMode", DEFAULT_PERSISTENCE_MODE)
@@ -42371,6 +44751,17 @@ def play_audio_file(
         karaoke_emojimax = bool(settings["KaraokeEmojimax"])
         set_karaoke_display_offset_tenths(int(settings.get("KaraokeOffsetTenths", 0)))
         console_karaoke_enabled = bool(settings.get("ConsoleKaraokeEnabled", 1))
+        alert_no_replaygain = bool(settings.get("AlertNoReplayGain", 1))
+        alert_missing_artist = bool(settings.get("AlertMissingArtist", 1))
+        alert_missing_title = bool(settings.get("AlertMissingTitle", 1))
+        alert_missing_karaoke = bool(settings.get("AlertMissingKaraoke", 0))
+        alert_missing_lyrics = bool(settings.get("AlertMissingLyrics", 0))
+        alert_missing_artwork = bool(settings.get("AlertMissingArtwork", 0))
+        alert_unknown_year = bool(settings.get("AlertUnknownYear", 0))
+        alert_unknown_genre = bool(settings.get("AlertUnknownGenre", 0))
+        alert_embedded_lyrics_mismatch = bool(settings.get("AlertEmbeddedLyricsMismatch", 1))
+        health = audio_health_result[0]
+        replaygain_missing_continuous = bool(alert_no_replaygain and health is not None and not getattr(health, "replaygain_valid", False))
         progress_style = settings["ProgressStyle"]
         progress_bar_enabled = bool(settings.get("ProgressBarEnabled", 1))
         progress_beat_reactive = bool(settings.get("ProgressBeatReactive", 1))
@@ -42411,6 +44802,15 @@ def play_audio_file(
             (karaoke_style_state, karaoke_style),
             (karaoke_treatment_state, karaoke_treatment),
             (console_karaoke_enabled_state, console_karaoke_enabled),
+            (alert_no_replaygain_state, alert_no_replaygain),
+            (alert_missing_artist_state, alert_missing_artist),
+            (alert_missing_title_state, alert_missing_title),
+            (alert_missing_karaoke_state, alert_missing_karaoke),
+            (alert_missing_lyrics_state, alert_missing_lyrics),
+            (alert_missing_artwork_state, alert_missing_artwork),
+            (alert_unknown_year_state, alert_unknown_year),
+            (alert_unknown_genre_state, alert_unknown_genre),
+            (alert_embedded_lyrics_mismatch_state, alert_embedded_lyrics_mismatch),
             (progress_style_state, progress_style),
             (progress_bar_enabled_state, progress_bar_enabled),
             (progress_beat_reactive_state, progress_beat_reactive),
@@ -42542,14 +44942,18 @@ def play_audio_file(
         audio-path-affecting controls (speed/output/volume/balance) request an
         FFplay reconstruction; visual choices repaint in-place.
         """
-        global ART_COLOR_VISUALIZER_REPRESENTATION, ART_COLOR_VISUALIZER_BAR_STRENGTH, ART_COLOR_VISUALIZER_BLACK_STRENGTH, ART_COLOR_VISUALIZER_KARAOKE_SIDES, ART_COLOR_VISUALIZER_KARAOKE, ART_COLOR_VISUALIZER_DEMO_SAVED, KARAOKE_DISPLAY_OFFSET_SECONDS, CURSIVE_FIX_RUNTIME
+        global ART_COLOR_VISUALIZER_REPRESENTATION, ART_COLOR_VISUALIZER_BAR_STRENGTH, ART_COLOR_VISUALIZER_BLACK_STRENGTH, ART_COLOR_VISUALIZER_BAR_BLEND_MODE, ART_COLOR_VISUALIZER_KARAOKE_SIDES, ART_COLOR_VISUALIZER_KARAOKE, ART_COLOR_VISUALIZER_DEMO_SAVED, KARAOKE_DISPLAY_OFFSET_SECONDS, CURSIVE_FIX_RUNTIME
         global ART_COLOR_AUTOSLIDES_LOCKED, ART_COLOR_AUTOSLIDES_SHARED_STARTED
+        global CONSOLE_VISUALIZER_VOLUME_FEEDBACK_ENABLED
         nonlocal visualizer_mode, color_style, processing_style, persistence_mode
         nonlocal visualizer_granularity, visualizer_input_source, karaoke_style, karaoke_treatment, console_karaoke_enabled
+        nonlocal decensor_console_karaoke, decensor_artwork_lyrics, decensor_floating_lyrics
+        nonlocal alert_no_replaygain, alert_missing_artist, alert_missing_title, alert_missing_karaoke, alert_missing_lyrics, alert_missing_artwork, alert_unknown_year, alert_unknown_genre, alert_embedded_lyrics_mismatch, replaygain_missing_continuous
         nonlocal karaoke_visualizer_height_mode
         nonlocal progress_style, progress_bar_enabled, progress_beat_reactive, progress_beat_detector, progress_beat_treatment
         nonlocal drcs_art_microtiles, drcs_art_bar_microtiles, fade_style, speed_index, output_channels, output_rate, output_bit_depth, output_device_index, output_devices_mask_value, output_device_indexes, mm_inspired_renderer_enabled
         nonlocal volume, balance, color_notice_until, processing_notice_until
+        nonlocal volume_feedback_box_until, volume_blink_rearm_on_playback_start
         nonlocal persistence_notice_until, granularity_notice_until
         nonlocal last_drcs_position, last_visualizer_payload, last_lyric_index
         nonlocal configured_visualizer_rows, truncate_top_visualizer_lines
@@ -42612,6 +45016,9 @@ def play_audio_file(
             elif not value and ART_COLOR_VISUALIZER_DEMO_SAVED is not None:
                 ART_COLOR_VISUALIZER_REPRESENTATION, ART_COLOR_VISUALIZER_BAR_STRENGTH, ART_COLOR_VISUALIZER_BLACK_STRENGTH = ART_COLOR_VISUALIZER_DEMO_SAVED
                 ART_COLOR_VISUALIZER_DEMO_SAVED = None
+            last_visualizer_payload = None
+        elif key == "art_color_bar_blend_mode":
+            ART_COLOR_VISUALIZER_BAR_BLEND_MODE = max(0, min(len(ART_COLOR_VISUALIZER_BAR_BLEND_MODES) - 1, int(value)))
             last_visualizer_payload = None
         elif key == "art_color_bar_strength":
             ART_COLOR_VISUALIZER_BAR_STRENGTH = max(0.0, min(1.0, value / 100.0))
@@ -42712,6 +45119,18 @@ def play_audio_file(
             if karaoke_treatment_state is not None:
                 karaoke_treatment_state[0] = karaoke_treatment
             last_lyric_index = None
+        elif key == "decensor_console_karaoke":
+            decensor_console_karaoke = bool(value)
+            if decensor_console_karaoke_state is not None: decensor_console_karaoke_state[0] = decensor_console_karaoke
+            last_lyric_index = None
+        elif key == "decensor_artwork_lyrics":
+            decensor_artwork_lyrics = bool(value)
+            if decensor_artwork_lyrics_state is not None: decensor_artwork_lyrics_state[0] = decensor_artwork_lyrics
+            last_lyric_index = None
+        elif key == "decensor_floating_lyrics":
+            decensor_floating_lyrics = bool(value)
+            if decensor_floating_lyrics_state is not None: decensor_floating_lyrics_state[0] = decensor_floating_lyrics
+            last_lyric_index = None
         elif key == "console_karaoke_enabled":
             console_karaoke_enabled = bool(value)
             if console_karaoke_enabled_state is not None:
@@ -42720,6 +45139,43 @@ def play_audio_file(
             last_visualizer_payload = None
             if not console_karaoke_enabled:
                 clear_region(LYRIC_ROW, LYRIC_ROWS)
+        elif key == "console_visualizer_volume_feedback_enabled":
+            CONSOLE_VISUALIZER_VOLUME_FEEDBACK_ENABLED = bool(value)
+            if not CONSOLE_VISUALIZER_VOLUME_FEEDBACK_ENABLED:
+                volume_feedback_box_until = 0.0
+            reset_visualizer_transport_cache()
+        elif key in {
+            "alert_no_replaygain", "alert_missing_artist", "alert_missing_title",
+            "alert_missing_karaoke", "alert_missing_lyrics", "alert_missing_artwork",
+            "alert_unknown_year", "alert_unknown_genre", "alert_embedded_lyrics_mismatch",
+        }:
+            mapping = {
+                "alert_no_replaygain": (alert_no_replaygain_state, "alert_no_replaygain"),
+                "alert_missing_artist": (alert_missing_artist_state, "alert_missing_artist"),
+                "alert_missing_title": (alert_missing_title_state, "alert_missing_title"),
+                "alert_missing_karaoke": (alert_missing_karaoke_state, "alert_missing_karaoke"),
+                "alert_missing_lyrics": (alert_missing_lyrics_state, "alert_missing_lyrics"),
+                "alert_missing_artwork": (alert_missing_artwork_state, "alert_missing_artwork"),
+                "alert_unknown_year": (alert_unknown_year_state, "alert_unknown_year"),
+                "alert_unknown_genre": (alert_unknown_genre_state, "alert_unknown_genre"),
+                "alert_embedded_lyrics_mismatch": (alert_embedded_lyrics_mismatch_state, "alert_embedded_lyrics_mismatch"),
+            }
+            state, variable_name = mapping[key]
+            enabled = bool(value)
+            if state is not None: state[0] = enabled
+            if key == "alert_no_replaygain":
+                alert_no_replaygain = enabled
+                health = audio_health_result[0]
+                replaygain_missing_continuous = bool(enabled and health is not None and not getattr(health, "replaygain_valid", False))
+            elif key == "alert_missing_artist": alert_missing_artist = enabled
+            elif key == "alert_missing_title": alert_missing_title = enabled
+            elif key == "alert_missing_karaoke": alert_missing_karaoke = enabled
+            elif key == "alert_missing_lyrics": alert_missing_lyrics = enabled
+            elif key == "alert_missing_artwork": alert_missing_artwork = enabled
+            elif key == "alert_unknown_year": alert_unknown_year = enabled
+            elif key == "alert_unknown_genre": alert_unknown_genre = enabled
+            elif key == "alert_embedded_lyrics_mismatch": alert_embedded_lyrics_mismatch = enabled
+            if web_server is not None: web_server.publish(**{variable_name: enabled})
         elif key == "progress_style":
             progress_style = min(len(PROGRESS_STYLE_NAMES), max(1, value))
             if progress_style_state is not None:
@@ -42814,9 +45270,13 @@ def play_audio_file(
         elif key == "volume":
             new_volume = min(400, max(0, value))
             restart_required = new_volume != volume
+            previous_volume = volume
             volume = new_volume
             if volume_state is not None:
                 volume_state[0] = volume
+            if restart_required:
+                start_volume_visual_feedback(previous_volume, volume, now_value)
+                volume_blink_rearm_on_playback_start = True
         elif key == "balance":
             new_balance = min(100, max(-100, value))
             restart_required = new_balance != balance
@@ -42853,7 +45313,8 @@ def play_audio_file(
         return True, restart_required
 
 
-    # Track logging state is shared by the live 33% local-history and >50% Last.fm paths,
+    # Track logging state is shared by the usual live 33% local-history and >50%
+    # Last.fm paths plus the complete-short-stream finish override,
     # Ctrl+Alt+S, and the final Done line.  The local SQL result is independent
     # from Last.fm and must remain visible when the network/auth scrobble fails.
     scrobble_state = ["not attempted"]  # not attempted | scrobbling | scrobbled | scrobble failed
@@ -42965,6 +45426,7 @@ def play_audio_file(
         status_callback,
         *,
         force: bool = False,
+        short_full_play: bool = False,
     ) -> bool:
         """Atomically launch at most one ordinary scrobble for this track visit."""
         nonlocal lastfm_submission_attempted
@@ -42982,7 +45444,7 @@ def play_audio_file(
 
         submitted = scrobble_track_async(
             audio_tags, duration, ranges, track_started_at,
-            status_callback, force=force,
+            status_callback, force=force, short_full_play=short_full_play,
         )
         if not submitted:
             with scrobble_visit_lock:
@@ -43288,6 +45750,35 @@ def play_audio_file(
             + "\033[0m\033[K\033[?25l"
         )
 
+    def toggle_song_learned_now() -> None:
+        """Alt+L: append a local learned or -learned override and repaint immediately."""
+        nonlocal prefer_existing_parent_attrib_after_already_learned
+        if not attribute_management_enabled:
+            set_transient_notice("Claire attribute management is suppressed", "\033[2;38;2;165;165;175mClaire attribute management is suppressed\033[0m", 5.0)
+            return
+        try:
+            was_learned = bool(audio_is_effectively_learned(audio_path))
+            desired = not was_learned
+            _target, _rule, _attrs = append_marked_attribute_rule(
+                audio_path, "learned" if desired else "-learned"
+            )
+            learned_state[0] = desired
+            prefer_existing_parent_attrib_after_already_learned = False
+            start_attribute_refresh(0.0)
+            if desired:
+                learned_history_ok = record_local_history_if_eligible([], force=True)
+                if not learned_history_ok:
+                    append_pafplayer_error(f"{audio_path}: learned attribute saved but local Last play update failed")
+            set_transient_notice(
+                f"Learned:{'Y' if desired else 'N'}",
+                ("\033[1;38;2;90;240;120mLearned:Y\033[0m" if desired else "\033[1;38;2;255;90;90mLearned:N\033[0m"),
+                3.0,
+            )
+        except Exception as exc:
+            append_pafplayer_exception(f"Alt+L toggle learned for {audio_path}", exc)
+            set_transient_error(f"💥Could not toggle learned: {exc} 💥", seconds=5.0)
+
+
     def mark_song_learned_now() -> None:
         """Prompt briefly for extras, then append learned plus those explicit tags.
 
@@ -43314,6 +45805,7 @@ def play_audio_file(
 
         try:
             if audio_is_effectively_learned(audio_path):
+                learned_state[0] = True
                 learned_remove_until = 0.0
                 prefer_existing_parent_attrib_after_already_learned = True
                 set_transient_warning("⚠Already learned ⚠", seconds=5.0)
@@ -43357,6 +45849,7 @@ def play_audio_file(
                 set_transient_warning(
                     "⚠ Learned saved; Last play update failed ⚠", seconds=8.0
                 )
+            learned_state[0] = True
             prefer_existing_parent_attrib_after_already_learned = False
             start_attribute_refresh(0.0)
 
@@ -43447,9 +45940,13 @@ def play_audio_file(
         """Replace the complete playback UI with its final, compact title."""
         if abs(KARAOKE_DISPLAY_OFFSET_SECONDS) >= 0.05 and lyrics and _lyrics_are_timed(lyrics):
             queue_karaoke_bake(audio_path, KARAOKE_DISPLAY_OFFSET_SECONDS)
-        preserve_live_tags = bool(
-            all_audio_tags_active and (result in NAVIGATION_ACTIONS or result == "completed")
-        )
+        # The full-screen Alt+3 renderer owns terminal rows that are destroyed
+        # during a track handoff. Keeping it latched across that teardown could
+        # leave the next track on an empty screen. Close it cleanly instead.
+        preserve_live_tags = False
+        if all_audio_tags_active and (result in NAVIGATION_ACTIONS or result == "completed"):
+            if all_audio_tags_state is not None:
+                all_audio_tags_state[0] = False
         if web_server is not None:
             web_server.finish_track(result)
         if external_album_art_window is not None:
@@ -43536,12 +46033,29 @@ def play_audio_file(
             )
 
         merged = merged_playback_ranges(played_ranges)
-        local_eligible = is_local_history_eligible(duration, merged)
-        scrobble_eligible = is_lastfm_scrobble_eligible(duration, merged)
+        process_returncode = process.poll() if process is not None else None
+        natural_completion = result == "completed" and process_returncode == 0
+        full_play_completion = bool(
+            natural_completion
+            and playback_ranges_cover_from_start(merged, playback_start)
+        )
+        short_full_play = is_short_track_full_play(
+            merged,
+            natural_completion=natural_completion,
+            playback_start=playback_start,
+        )
+        local_eligible = is_local_history_eligible(
+            duration, merged, full_play_completion=full_play_completion,
+        )
+        scrobble_eligible = is_lastfm_scrobble_eligible(
+            duration, merged, short_full_play=short_full_play,
+        )
         # Ctrl+Alt+S may already have force-written local history.  Otherwise
-        # normal completion writes it once the independent 33% rule is satisfied.
+        # the independent 33% rule applies.  A clean decoder EOF force-writes
+        # local history because corrupt duration metadata can make that threshold
+        # unreachable even after every playable audio packet was consumed.
         if local_eligible and local_log_state[0] is not True:
-            record_local_history_if_eligible(merged)
+            record_local_history_if_eligible(merged, force=full_play_completion)
 
         def _final_scrobble_status(label: str) -> None:
             _record_scrobble_status(label)
@@ -43559,7 +46073,7 @@ def play_audio_file(
             scrobble_state[0] = "scrobbling"
             _write_played_status(local_log_state[0], scrobble_state[0])
             submitted = _submit_scrobble_once_for_visit(
-                merged, _final_scrobble_status,
+                merged, _final_scrobble_status, short_full_play=short_full_play,
             )
             if not submitted and scrobble_state[0] == "scrobbling":
                 scrobble_state[0] = "scrobble failed"
@@ -43578,6 +46092,10 @@ def play_audio_file(
             "track.finish",
             path=audio_path,
             result=result,
+            natural_completion=natural_completion,
+            full_play_completion=full_play_completion,
+            short_full_play=short_full_play,
+            process_returncode=process_returncode,
             listened_ranges=merged,
             local_history_eligible=local_eligible,
             local_history_written=local_log_state[0],
@@ -43773,6 +46291,42 @@ def play_audio_file(
         # Lowest-priority startup work comes last: audio owns the device, the
         # spectrum worker has started, and any initial SIXEL frame is already up.
         start_attribute_refresh()
+
+        def consume_audio_health_result() -> bool:
+            """Apply one completed background health audit on the owner/UI thread."""
+            nonlocal track_alerts_announced, replaygain_missing_continuous, track_alert_details
+            if track_alerts_announced or not audio_health_finished.is_set():
+                return False
+            track_alerts_announced = True
+            health = audio_health_result[0]
+            if health is None:
+                return False
+            replaygain_missing_continuous = bool(alert_no_replaygain and not getattr(health, "replaygain_valid", False))
+            expects_lyrics = not any(
+                marker in str(audio_path).casefold()
+                for marker in (
+                    "[instrumental]", "(instrumental)", "[no lyrics]", "(no lyrics)",
+                    "[no vocals]", "(no vocals)", "[sound effect]", "(sound effect)",
+                    "[sound clip]", "(sound clip)", "[chiptune]", "(chiptune)", "audiobook",
+                )
+            )
+            alerts: list[str] = []
+            if alert_missing_artist and not str(getattr(health, "artist", "") or "").strip(): alerts.append("Missing artist")
+            if alert_missing_title and not str(getattr(health, "title", "") or "").strip(): alerts.append("Missing song title")
+            if expects_lyrics and alert_missing_karaoke and not bool(getattr(health, "has_timed_lyrics", False)): alerts.append("Missing karaoke")
+            if expects_lyrics and alert_missing_lyrics and not bool(getattr(health, "has_plain_lyrics", False)) and not bool(getattr(health, "has_timed_lyrics", False)): alerts.append("Missing lyrics")
+            if alert_missing_artwork and not bool(getattr(health, "has_artwork", False)): alerts.append("Missing artwork")
+            if alert_unknown_year and not str(getattr(health, "year", "") or "").strip(): alerts.append("Unknown year")
+            if alert_unknown_genre and not str(getattr(health, "genre", "") or "").strip(): alerts.append("Unknown genre")
+            if alert_embedded_lyrics_mismatch:
+                alerts.extend(str(item) for item in getattr(health, "lyric_sync_messages", ()) if str(item).strip())
+            track_alert_details = list(dict.fromkeys(alerts))
+            if track_alert_details:
+                short = " · ".join(track_alert_details[:3])
+                if len(track_alert_details) > 3:
+                    short += f" · +{len(track_alert_details)-3} more"
+                set_transient_warning("⚠ " + short + "  [? for details]", seconds=6.0)
+            return True
         indicator = "▶️"
         if output_rate not in OUTPUT_SAMPLE_RATES:
             output_rate = HDMI_PCM_OUTPUT_RATE
@@ -43849,8 +46403,8 @@ def play_audio_file(
                 )
             # A successful FFplay launch is the playback-lifecycle boundary for
             # Last.fm Now Playing. This is intentionally OUTSIDE the scrobble
-            # eligibility machinery: short/skipped tracks may appear temporarily
-            # as Now Playing but are never added to local history unless 33% is heard.
+            # eligibility machinery: skipped tracks may appear temporarily as
+            # Now Playing, while complete short streams are handled only at EOF.
             # The per-visit guard prevents seeks/restarts from resubmitting.
             if not lastfm_now_playing_submitted[0] and process.poll() is None:
                 lastfm_now_playing_submitted[0] = True
@@ -43859,15 +46413,21 @@ def play_audio_file(
                     completion_event=lastfm_now_playing_finished,
                 )
             segment_started = monotonic()
+            if volume_blink_rearm_on_playback_start:
+                # Volume changes rebuild FFplay. Start the timed phase sequence
+                # after that restart so process startup cannot swallow flash #2.
+                volume_blink_started_at = segment_started
+                last_volume_blink_phase = -1
+                volume_blink_rearm_on_playback_start = False
             segment_was_recorded = False
 
-            def record_segment(end_position: float) -> None:
+            def record_segment(end_position: float, *, minimum_seconds: float = 3.0) -> None:
                 nonlocal segment_was_recorded
                 if segment_was_recorded:
                     return
                 segment_was_recorded = True
                 bounded_end = min(playback_end, end_position) if playback_end is not None else end_position
-                if bounded_end - position > 3.0:
+                if bounded_end - position > minimum_seconds:
                     played_ranges.append((position, bounded_end))
 
             while process.poll() is None:
@@ -43882,6 +46442,18 @@ def play_audio_file(
                 # internally synchronized instead of sampling slightly different
                 # clocks.
                 now = monotonic()
+                current_volume_blink_phase = volume_inverse_blink_phase(
+                    now, volume_blink_started_at,
+                )
+                if current_volume_blink_phase != last_volume_blink_phase:
+                    last_volume_blink_phase = current_volume_blink_phase
+                    if (
+                        not help_overlay_until
+                        and not favorite_menu_active
+                        and not default_menu_active
+                        and not all_audio_tags_active
+                    ):
+                        render_controls(playback_fraction(position))
                 performance_rolled = roll_visualizer_performance(now)
                 if performance_rolled and web_server is not None:
                     web_server.update_fields(visualizer_perf=dict(performance_latest))
@@ -43891,6 +46463,11 @@ def play_audio_file(
                 current_warning_serial = pafplayer_runtime_warning_serial()
                 if current_warning_serial != last_runtime_warning_serial:
                     last_runtime_warning_serial = current_warning_serial
+                    if help_overlay_until:
+                        render_help_overlay()
+                    elif not favorite_menu_active and not default_menu_active:
+                        render_controls(playback_fraction(position))
+                if consume_audio_health_result():
                     if help_overlay_until:
                         render_help_overlay()
                     elif not favorite_menu_active and not default_menu_active:
@@ -43970,6 +46547,8 @@ def play_audio_file(
                     external_album_art_window.update_karaoke_frame(
                         shared_karaoke_frame(displayed_position),
                         emojimax=karaoke_emojimax,
+                        decensor_artwork=decensor_artwork_lyrics,
+                        decensor_floating=decensor_floating_lyrics,
                     )
                     if perf_art_started:
                         performance_profile_add("art_lyrics", time.perf_counter() - perf_art_started)
@@ -44025,6 +46604,7 @@ def play_audio_file(
                         art_color_karaoke_sides=ART_COLOR_VISUALIZER_KARAOKE_SIDES,
                         art_color_karaoke=ART_COLOR_VISUALIZER_KARAOKE,
                         art_color_bar_strength=round(ART_COLOR_VISUALIZER_BAR_STRENGTH * 100),
+                        art_color_bar_blend_mode=ART_COLOR_VISUALIZER_BAR_BLEND_MODE,
                         art_color_black_strength=round(ART_COLOR_VISUALIZER_BLACK_STRENGTH * 100),
                         color_style=color_style,
                         color_reverse=color_reverse,
@@ -44036,8 +46616,23 @@ def play_audio_file(
                         karaoke_style=karaoke_style,
                         karaoke_offset_seconds=round(KARAOKE_DISPLAY_OFFSET_SECONDS, 1),
                         karaoke_treatment=karaoke_treatment,
+                        lyrics_mode=(external_album_art_window.lyrics_mode if external_album_art_window is not None else 0),
+                        artwork_karaoke_enabled=(external_album_art_window.artwork_karaoke_enabled if external_album_art_window is not None else False),
                         karaoke_emojimax=karaoke_emojimax,
+                        decensor_console_karaoke=decensor_console_karaoke,
+                        decensor_artwork_lyrics=decensor_artwork_lyrics,
+                        decensor_floating_lyrics=decensor_floating_lyrics,
                         console_karaoke_enabled=console_karaoke_enabled,
+                        alert_no_replaygain=alert_no_replaygain,
+                        alert_missing_artist=alert_missing_artist,
+                        alert_missing_title=alert_missing_title,
+                        alert_missing_karaoke=alert_missing_karaoke,
+                        alert_missing_lyrics=alert_missing_lyrics,
+                        alert_missing_artwork=alert_missing_artwork,
+                        alert_unknown_year=alert_unknown_year,
+                        alert_unknown_genre=alert_unknown_genre,
+                        alert_embedded_lyrics_mismatch=alert_embedded_lyrics_mismatch,
+                        learned=bool(learned_state[0]),
                         progress_style=progress_style,
                         progress_bar_enabled=progress_bar_enabled,
                         progress_beat_reactive=progress_beat_reactive,
@@ -44049,12 +46644,18 @@ def play_audio_file(
                         fade_style=fade_style,
                         frequency_warp_enabled=frequency_warp_enabled,
                         drcs_enabled=drcs_enabled,
+                        console_visualizer_volume_feedback_enabled=CONSOLE_VISUALIZER_VOLUME_FEEDBACK_ENABLED,
                         sixel_enabled=sixel_enabled,
                         album_art_visualizer_enabled=album_art_visualizer_enabled,
                         art_popup_variant_index=(external_album_art_window.current_variant_index if external_album_art_window is not None else 0),
                         lastfm_profile_url=lastfm_profile_url(),
                         external_album_art_enabled=(
                             external_album_art_window.enabled
+                            if external_album_art_window is not None
+                            else False
+                        ),
+                        floating_lyrics_enabled=(
+                            external_album_art_window.floating_lyrics_enabled
                             if external_album_art_window is not None
                             else False
                         ),
@@ -44112,6 +46713,9 @@ def play_audio_file(
                     menu_choice = read_windows_menu_choice()
                     if menu_choice is not None and menu_choice.casefold() != "f":
                         if apply_favorite_choice(menu_choice):
+                            start_interaction_visual_feedback(
+                                f"Favorite choice: {menu_choice.upper()}", monotonic(),
+                            )
                             favorite_menu_active = False
                             favorite_restore_mode = False
                             render_controls(playback_fraction(displayed_position))
@@ -44121,6 +46725,9 @@ def play_audio_file(
                     menu_choice = read_windows_menu_choice()
                     if menu_choice is not None and menu_choice != "*":
                         if apply_default_choice(menu_choice):
+                            start_interaction_visual_feedback(
+                                f"Default choice: {menu_choice.upper()}", monotonic(),
+                            )
                             default_menu_active = False
                             default_restore_mode = False
                             render_controls(playback_fraction(displayed_position))
@@ -44147,6 +46754,9 @@ def play_audio_file(
                         track=audio_path,
                         position_seconds=displayed_position,
                     )
+                    feedback_label = interaction_feedback_label(action)
+                    if feedback_label:
+                        start_interaction_visual_feedback(feedback_label, monotonic())
 
                 if action == UNDO_LAST_CHANGE:
                     changed, restart_audio = undo_last_runtime_change()
@@ -44440,7 +47050,7 @@ def play_audio_file(
                         if perf_metadata_started:
                             performance_profile_add("metadata", time.perf_counter() - perf_metadata_started)
                     last_metadata_animation_write = now
-                if action is None and not config_visualizers_paused and not all_audio_tags_active and layered_art_visualizer_enabled and now - last_sixel_refresh >= layered_art_restore_period(visualizer_columns, drcs_rows + LYRIC_ROWS):
+                if action is None and not config_visualizers_paused and not all_audio_tags_active and layered_art_visualizer_enabled and visualizer_track_artwork_allowed(visualizer_input_source, False) and now - last_sixel_refresh >= layered_art_restore_period(visualizer_columns, drcs_rows + LYRIC_ROWS):
                     active_now = shared_karaoke_frame(displayed_position).active
                     expand_now = bool(
                         karaoke_visualizer_expansion_enabled and LYRIC_ROWS
@@ -44462,7 +47072,7 @@ def play_audio_file(
                         write_console("\033[?25l")
                         show_status(displayed_position, indicator, visualizer_only=True)
                     last_sixel_refresh = now
-                if action is None and not config_visualizers_paused and not all_audio_tags_active and album_art_visualizer_enabled and not layered_art_visualizer_enabled and now - last_sixel_refresh >= 0.5:
+                if action is None and not config_visualizers_paused and not all_audio_tags_active and album_art_visualizer_enabled and not layered_art_visualizer_enabled and visualizer_track_artwork_allowed(visualizer_input_source, False) and now - last_sixel_refresh >= 0.5:
                     active_now = shared_karaoke_frame(displayed_position).active
                     expand_now = bool(
                         karaoke_visualizer_expansion_enabled and LYRIC_ROWS
@@ -44655,6 +47265,11 @@ def play_audio_file(
                     )
                     force_log_and_scrobble_now(current_ranges)
                     render_controls(playback_fraction(displayed_position))
+                    continue
+                if action == TOGGLE_LEARNED_STATE:
+                    toggle_song_learned_now()
+                    render_controls(playback_fraction(displayed_position))
+                    show_status(displayed_position, indicator)
                     continue
                 if action == MARK_SONG_LEARNED:
                     mark_song_learned_now()
@@ -44993,6 +47608,22 @@ def play_audio_file(
                     render_controls(playback_fraction(displayed_position))
                     show_status(displayed_position, indicator)
                     continue
+                if action == ARTWORK_KARAOKE_CONFIG:
+                    if external_album_art_window is not None:
+                        external_album_art_window.open_karaoke_color_configurator("artwork")
+                    else:
+                        set_transient_error("💥 Album art window unavailable 💥", seconds=5.0)
+                    continue
+                if action == ARTWORK_KARAOKE_TOGGLE:
+                    if external_album_art_window is not None:
+                        external_album_art_window.set_artwork_karaoke_enabled(not external_album_art_window.artwork_karaoke_enabled)
+                    continue
+                if action == FLOATING_KARAOKE_CONFIG:
+                    if external_album_art_window is not None:
+                        external_album_art_window.open_karaoke_color_configurator("floating")
+                    else:
+                        set_transient_error("💥 Floating lyrics unavailable 💥", seconds=5.0)
+                    continue
                 if action == EXTERNAL_ALBUM_ART_IDLE_START:
                     if external_album_art_window is not None and external_album_art_window.start_idle_routine():
                         set_transient_notice(
@@ -45063,6 +47694,11 @@ def play_audio_file(
                     if frequency_warp_state is not None:
                         frequency_warp_state[0] = frequency_warp_enabled
                     frequency_warp_notice_until = now + 3.0
+                    set_transient_notice(
+                        f"Frequency warp {'enabled' if frequency_warp_enabled else 'disabled'}",
+                        f"\033[1;38;2;255;220;100mFrequency warp {'enabled' if frequency_warp_enabled else 'disabled'}\033[0m",
+                        seconds=3.0,
+                    )
                     persistence_state.clear()
                     persistence_state.update(new_visualizer_persistence_state())
                     visualizer_agc_state.clear()
@@ -45167,6 +47803,7 @@ def play_audio_file(
                     if speed_index_state is not None:
                         speed_index_state[0] = speed_index
                     change_volume(VOLUME_RESET, now)
+                    volume_blink_rearm_on_playback_start = True
                     indicator = "↺"
                     loop_indicator_until = now + 4.0
                     position += elapsed
@@ -45245,6 +47882,7 @@ def play_audio_file(
                 if action in VOLUME_STEPS or action == VOLUME_RESET:
                     record_segment(displayed_position)
                     change_volume(action, now)
+                    volume_blink_rearm_on_playback_start = True
                     indicator = "🔊" if volume_direction == "up" else "🔉"
                     loop_indicator_until = now + 4.0
                     position += elapsed
@@ -45269,6 +47907,8 @@ def play_audio_file(
                     stop_process(process)
                     header_paused = True
                     prompt_paused_state[0] = True
+                    if external_album_art_window is not None:
+                        external_album_art_window.set_playback_running(False)
                     sync_live_visualizer_capture(True)
                     if paused_state is not None:
                         paused_state[0] = True
@@ -45276,6 +47916,18 @@ def play_audio_file(
                     show_status(position, "⏸️")
                     while True:
                         paused_now = monotonic()
+                        current_volume_blink_phase = volume_inverse_blink_phase(
+                            paused_now, volume_blink_started_at,
+                        )
+                        if current_volume_blink_phase != last_volume_blink_phase:
+                            last_volume_blink_phase = current_volume_blink_phase
+                            if (
+                                not help_overlay_until
+                                and not favorite_menu_active
+                                and not default_menu_active
+                                and not all_audio_tags_active
+                            ):
+                                render_controls(playback_fraction(position))
                         fps_hud_rolled = roll_fps_hud(paused_now)
                         if fps_hud_rolled and not help_overlay_until and not favorite_menu_active and not default_menu_active:
                             render_controls(playback_fraction(position))
@@ -45322,6 +47974,11 @@ def play_audio_file(
                         current_warning_serial = pafplayer_runtime_warning_serial()
                         if current_warning_serial != last_runtime_warning_serial:
                             last_runtime_warning_serial = current_warning_serial
+                        if consume_audio_health_result():
+                            if help_overlay_until:
+                                render_help_overlay()
+                            else:
+                                render_controls(playback_fraction(position))
                             if help_overlay_until:
                                 render_help_overlay()
                             elif not favorite_menu_active and not default_menu_active:
@@ -45345,6 +48002,8 @@ def play_audio_file(
                             external_album_art_window.update_karaoke_frame(
                                 shared_karaoke_frame(position),
                                 emojimax=karaoke_emojimax,
+                                decensor_artwork=decensor_artwork_lyrics,
+                                decensor_floating=decensor_floating_lyrics,
                             )
                             last_external_lyric_publish = paused_now
                         if web_server is not None and web_server.web_visualizer_active(paused_now) and paused_now - last_web_spectrum_publish >= WEB_SPECTRUM_POLL_MILLISECONDS / 1000.0:
@@ -45378,6 +48037,8 @@ def play_audio_file(
                                 visualizer_granularity=visualizer_granularity,
                                 karaoke_style=karaoke_style,
                                 karaoke_treatment=karaoke_treatment,
+                                lyrics_mode=(external_album_art_window.lyrics_mode if external_album_art_window is not None else 0),
+                                artwork_karaoke_enabled=(external_album_art_window.artwork_karaoke_enabled if external_album_art_window is not None else False),
                                 karaoke_emojimax=karaoke_emojimax,
                                 progress_style=progress_style,
                                 progress_bar_enabled=progress_bar_enabled,
@@ -45387,10 +48048,16 @@ def play_audio_file(
                                 fade_style=fade_style,
                                 frequency_warp_enabled=frequency_warp_enabled,
                                 drcs_enabled=drcs_enabled,
+                                console_visualizer_volume_feedback_enabled=CONSOLE_VISUALIZER_VOLUME_FEEDBACK_ENABLED,
                                 sixel_enabled=sixel_enabled,
                                 album_art_visualizer_enabled=album_art_visualizer_enabled,
                                 external_album_art_enabled=(
                                     external_album_art_window.enabled
+                                    if external_album_art_window is not None
+                                    else False
+                                ),
+                                floating_lyrics_enabled=(
+                                    external_album_art_window.floating_lyrics_enabled
                                     if external_album_art_window is not None
                                     else False
                                 ),
@@ -45441,6 +48108,9 @@ def play_audio_file(
                             menu_choice = read_windows_menu_choice()
                             if menu_choice is not None and menu_choice.casefold() != "f":
                                 if apply_favorite_choice(menu_choice):
+                                    start_interaction_visual_feedback(
+                                        f"Favorite choice: {menu_choice.upper()}", monotonic(),
+                                    )
                                     favorite_menu_active = False
                                     favorite_restore_mode = False
                                     render_controls(playback_fraction(position))
@@ -45450,6 +48120,9 @@ def play_audio_file(
                             menu_choice = read_windows_menu_choice()
                             if menu_choice is not None and menu_choice != "*":
                                 if apply_default_choice(menu_choice):
+                                    start_interaction_visual_feedback(
+                                        f"Default choice: {menu_choice.upper()}", monotonic(),
+                                    )
                                     default_menu_active = False
                                     default_restore_mode = False
                                     render_controls(playback_fraction(position))
@@ -45472,6 +48145,9 @@ def play_audio_file(
                                 track=audio_path,
                                 position_seconds=position,
                             )
+                            feedback_label = interaction_feedback_label(paused_action)
+                            if feedback_label:
+                                start_interaction_visual_feedback(feedback_label, monotonic())
 
                         if paused_action is None and _PENDING_KARAOKE_BAKE_CHANGED.is_set():
                             _PENDING_KARAOKE_BAKE_CHANGED.clear()
@@ -45711,6 +48387,11 @@ def play_audio_file(
                             render_controls(playback_fraction(position))
                             show_status(position, "⏸️")
                             continue
+                        if paused_action == TOGGLE_LEARNED_STATE:
+                            toggle_song_learned_now()
+                            render_controls(playback_fraction(position))
+                            show_status(position, "⏸️")
+                            continue
                         if paused_action == MARK_SONG_LEARNED:
                             mark_song_learned_now()
                             render_controls(playback_fraction(position))
@@ -45763,6 +48444,22 @@ def play_audio_file(
                                 set_transient_error("💥 Floating lyrics unavailable 💥", seconds=5.0)
                             render_controls(playback_fraction(position))
                             show_status(position, "⏸️")
+                            continue
+                        if paused_action == ARTWORK_KARAOKE_CONFIG:
+                            if external_album_art_window is not None:
+                                external_album_art_window.open_karaoke_color_configurator("artwork")
+                            else:
+                                set_transient_error("💥 Album art window unavailable 💥", seconds=5.0)
+                            continue
+                        if paused_action == ARTWORK_KARAOKE_TOGGLE:
+                            if external_album_art_window is not None:
+                                external_album_art_window.set_artwork_karaoke_enabled(not external_album_art_window.artwork_karaoke_enabled)
+                            continue
+                        if paused_action == FLOATING_KARAOKE_CONFIG:
+                            if external_album_art_window is not None:
+                                external_album_art_window.open_karaoke_color_configurator("floating")
+                            else:
+                                set_transient_error("💥 Floating lyrics unavailable 💥", seconds=5.0)
                             continue
                         if paused_action == HUD_SMART_ALIGNMENT_TOGGLE:
                             last_play_alignment_enabled = not last_play_alignment_enabled
@@ -45883,6 +48580,11 @@ def play_audio_file(
                             if frequency_warp_state is not None:
                                 frequency_warp_state[0] = frequency_warp_enabled
                             frequency_warp_notice_until = paused_now + 3.0
+                            set_transient_notice(
+                                f"Frequency warp {'enabled' if frequency_warp_enabled else 'disabled'}",
+                                f"\033[1;38;2;255;220;100mFrequency warp {'enabled' if frequency_warp_enabled else 'disabled'}\033[0m",
+                                seconds=3.0,
+                            )
                             persistence_state.clear()
                             persistence_state.update(new_visualizer_persistence_state())
                             visualizer_agc_state.clear()
@@ -46270,6 +48972,8 @@ def play_audio_file(
                         sleeper(VISUALIZER_IDLE_SLEEP_MAX if live_visualizer_capture_mode(visualizer_input_source, True) else 0.02)
                     header_paused = False
                     prompt_paused_state[0] = False
+                    if external_album_art_window is not None:
+                        external_album_art_window.set_playback_running(True)
                     sync_live_visualizer_capture(False)
                     render_static_header(position)
                     break
@@ -46312,9 +49016,13 @@ def play_audio_file(
                         output_rate_state[0] = output_rate
                     continue
                 completed_position = position + startup_elapsed * speed
+                clean_process_eof = process.poll() == 0
                 record_segment(
                     min(playback_end, completed_position)
-                    if playback_end is not None else completed_position
+                    if playback_end is not None else completed_position,
+                    # Preserve even sub-three-second audio only after a clean
+                    # decoder EOF. Failed startups retain the noise filter.
+                    minimum_seconds=0.0 if clean_process_eof else 3.0,
                 )
                 if abort_requested.is_set():
                     return finish_playback("stopped")
@@ -46324,6 +49032,13 @@ def play_audio_file(
                     continue
                 return finish_playback("completed")
     finally:
+        # This event owns every background spectrum loop for this track, not
+        # just Ctrl+C handling.  V311 left it clear after normal completion,
+        # navigation, and exceptions, so an analyzer caught at its ahead-of-
+        # playhead gate could wake forever after the track had gone away.
+        # Signal-only cleanup is intentional: navigation must not block while a
+        # currently-running FFmpeg chunk winds down.
+        abort_requested.set()
         stop_process(process)
         if live_visualizer_capture is not None:
             live_visualizer_capture.stop()
@@ -46350,6 +49065,19 @@ def play_audio_filename(audio_filename: str | os.PathLike[str]) -> str:
 
 class PlayWaveFileTests(unittest.TestCase):
     """Embedded unit coverage for controls and process restarts."""
+
+    def test_v359_emojimaxx_cli_preview_prints_and_exits(self) -> None:
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            self.assertEqual(0, main(["--emojimaxx", "hello i am 18 how are you"]))
+        self.assertIn("①⑧", stdout.getvalue())
+        self.assertNotIn("ERROR", stdout.getvalue())
+
+    def test_v359_emojimaxx_cli_preview_requires_one_text_argument(self) -> None:
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            self.assertEqual(2, main(["--emojimaxx"]))
+        self.assertIn("requires exactly one quoted text argument", stderr.getvalue())
 
     @unittest.skipUnless(os.name == "nt", "Winamp messaging is Windows-only")
     def test_winamp_is_paused_and_resumed_without_stop(self) -> None:
@@ -46776,11 +49504,182 @@ class PlayWaveFileTests(unittest.TestCase):
                         ],
                     )
                 with mock.patch(
-                    __name__ + ".playlist_history_identity",
-                    return_value=(filename, 154, "rammstein\x1fdiamant"),
-                ) as identity_probe, mock.patch("random.choice", side_effect=lambda values: values[0]):
+                    __name__ + ".playlist_shuffle_cached_metadata",
+                    return_value=(154.0, {"Artist": "Rammstein", "Song": "Diamant"}),
+                ) as metadata_probe, mock.patch("random.choice", side_effect=lambda values: values[0]):
                     self.assertEqual(entry, choose_least_recent_playlist_track([entry]))
-                identity_probe.assert_called_once_with(entry)
+                metadata_probe.assert_called_once_with(entry)
+
+    def test_v314_same_identity_filename_rows_need_no_metadata_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            database_path = root / "history.sqlite3"
+            entry = root / "08_Diamant.mp3"
+            filename = playlist_history_filename_key(entry)
+            with mock.patch.dict(os.environ, {"PLAY_AUDIO_FILE_HISTORY_DB": str(database_path)}):
+                with playlist_history_connection() as database:
+                    database.executemany(
+                        "INSERT INTO played_tracks_recent(filename, duration_seconds, tag, played_at) VALUES (?, ?, ?, ?)",
+                        [
+                            (filename, 154, "rammstein\x1fdiamant", 20.0),
+                            (filename, 155, "RAMMSTEIN\x1fDIAMANT", 30.0),
+                        ],
+                    )
+                with mock.patch(
+                    __name__ + ".playlist_shuffle_cached_metadata",
+                    side_effect=AssertionError("same-identity filename rows must not probe"),
+                ):
+                    scored = playlist_history_scores([entry])
+            self.assertEqual(30.0, scored[0][0])
+
+    def test_v314_shuffle_metadata_cache_survives_process_cache_reset_and_invalidates(self) -> None:
+        global _PLAYLIST_SHUFFLE_METADATA_CACHE_PATH, _PLAYLIST_SHUFFLE_METADATA_CACHE_DIRTY
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            cache_path = root / "shuffle-metadata.json"
+            track = root / "song.mp3"
+            track.write_bytes(b"first")
+            original = (123.5, {"Artist": "Artist", "Song": "Song", "Album": "Album"})
+            changed = (124.5, {"Artist": "Artist", "Song": "Changed", "Album": "Album"})
+            try:
+                with mock.patch.dict(
+                    os.environ,
+                    {"PLAY_AUDIO_FILE_SHUFFLE_METADATA_CACHE": str(cache_path)},
+                ), mock.patch(__name__ + ".probe_audio_metadata", return_value=original) as probe:
+                    self.assertEqual(original, playlist_shuffle_cached_metadata(track))
+                    save_playlist_shuffle_metadata_cache()
+                    probe.assert_called_once_with(track)
+                self.assertTrue(cache_path.is_file())
+
+                _AUDIO_METADATA_CACHE.clear()
+                _PLAYLIST_SHUFFLE_METADATA_CACHE.clear()
+                _PLAYLIST_SHUFFLE_METADATA_CACHE_PATH = None
+                _PLAYLIST_SHUFFLE_METADATA_CACHE_DIRTY = False
+                with mock.patch.dict(
+                    os.environ,
+                    {"PLAY_AUDIO_FILE_SHUFFLE_METADATA_CACHE": str(cache_path)},
+                ), mock.patch(
+                    __name__ + ".probe_audio_metadata",
+                    side_effect=AssertionError("unchanged file should use persistent metadata"),
+                ):
+                    self.assertEqual(original, playlist_shuffle_cached_metadata(track))
+
+                track.write_bytes(b"changed-size")
+                _AUDIO_METADATA_CACHE.clear()
+                with mock.patch.dict(
+                    os.environ,
+                    {"PLAY_AUDIO_FILE_SHUFFLE_METADATA_CACHE": str(cache_path)},
+                ), mock.patch(__name__ + ".probe_audio_metadata", return_value=changed) as probe:
+                    self.assertEqual(changed, playlist_shuffle_cached_metadata(track))
+                    probe.assert_called_once_with(track)
+            finally:
+                _PLAYLIST_SHUFFLE_METADATA_CACHE.clear()
+                _PLAYLIST_SHUFFLE_METADATA_CACHE_PATH = None
+                _PLAYLIST_SHUFFLE_METADATA_CACHE_DIRTY = False
+
+    def test_v314_progressive_shuffle_scores_the_playlist_once(self) -> None:
+        entries = [Path(f"song-{index}.mp3") for index in range(20)]
+        scores = [(float(index), entry) for index, entry in enumerate(entries)]
+        reports: list[str] = []
+        with mock.patch(__name__ + ".playlist_history_scores", return_value=scores) as scorer:
+            order = build_playlist_shuffle_order_progressive(entries, reports.append)
+        self.assertCountEqual(entries, order)
+        scorer.assert_called_once()
+        self.assertEqual(entries, scorer.call_args.args[0])
+        self.assertTrue(callable(scorer.call_args.kwargs["progress_callback"]))
+        self.assertEqual("historical shuffling done", reports[-1])
+
+    def test_v308_bulk_history_uses_artist_title_when_filename_bucket_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            database_path = root / "history.sqlite3"
+            entry = root / "Ghostbusters 2016 Version.mp3"
+            tags = {"Artist": "Test Artist", "Song": "Ghostbusters", "Album": "Ghostbusters 2016"}
+            played_at = 1_789_999_999.0
+            with mock.patch.dict(os.environ, {"PLAY_AUDIO_FILE_HISTORY_DB": str(database_path)}):
+                with playlist_history_connection() as database:
+                    playlist_history_mark_artist_title_played(
+                        tags["Artist"], tags["Song"], 180, played_at=played_at, filename="", database=database
+                    )
+                _PLAYLIST_HISTORY_LAST_PLAYED_CACHE.clear()
+                _PLAYLIST_FULL_IDENTITY_LAST_PLAYED_CACHE.clear()
+                with mock.patch(__name__ + ".probe_audio_metadata", return_value=(180.0, tags)):
+                    scored = playlist_history_scores([entry])
+                    self.assertEqual(played_at, scored[0][0])
+                    self.assertEqual(played_at, playlist_history_last_played_sync_candidate(entry))
+            self.assertEqual(played_at, _PLAYLIST_HISTORY_LAST_PLAYED_CACHE[playlist_history_runtime_key(entry)])
+
+    def test_v308_authoritative_history_uses_newest_safe_identity_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            database_path = root / "history.sqlite3"
+            entry = root / "01_Same Song.mp3"
+            tags = {"Artist": "Same Artist", "Song": "Same Song", "Album": "Album"}
+            filename_key = playlist_history_filename_key(entry)
+            old_filename_play = 100.0
+            newer_identity_play = 200.0
+            with mock.patch.dict(os.environ, {"PLAY_AUDIO_FILE_HISTORY_DB": str(database_path)}):
+                with playlist_history_connection() as database:
+                    database.execute(
+                        "INSERT INTO played_tracks_recent(filename,duration_seconds,tag,played_at) VALUES(?,?,?,?)",
+                        (filename_key, 180, playlist_history_tag_key(tags), old_filename_play),
+                    )
+                    playlist_history_mark_artist_title_played(
+                        tags["Artist"], tags["Song"], 180,
+                        played_at=newer_identity_play, filename=filename_key, database=database,
+                    )
+                    database.commit()
+                _PLAYLIST_HISTORY_LAST_PLAYED_CACHE.clear()
+                _PLAYLIST_FULL_IDENTITY_LAST_PLAYED_CACHE.clear()
+                with mock.patch(__name__ + ".probe_audio_metadata", return_value=(180.0, tags)):
+                    scored = playlist_history_scores([entry])
+                    self.assertEqual(newer_identity_play, scored[0][0])
+                    _PLAYLIST_HISTORY_LAST_PLAYED_CACHE.clear()
+                    self.assertEqual(newer_identity_play, playlist_history_last_played_sync_candidate(entry))
+
+    def test_v308_nonblocking_startup_waits_for_unchecked_identity_source(self) -> None:
+        track = Path("01_Song.mp3")
+        tags = {"Artist": "Artist", "Song": "Song", "Album": "Album"}
+        filename_key = playlist_history_filename_key(track)
+        runtime_key = playlist_history_runtime_key(track)
+        _PLAYLIST_HISTORY_LAST_PLAYED_CACHE.pop(runtime_key, None)
+        _PLAYLIST_FULL_IDENTITY_LAST_PLAYED_CACHE.pop(playlist_history_tag_key(tags), None)
+        with _PLAYLIST_HISTORY_PREFETCH_LOCK:
+            _PLAYLIST_HISTORY_PREFETCH_ROWS[filename_key] = [
+                (180, playlist_history_tag_key(tags), 100.0)
+            ]
+        try:
+            # Filename history alone is only provisional because exact Artist+Song
+            # could contain a newer play.  Startup must stay blank until the
+            # background authoritative resolver checks that second source.
+            self.assertIsNone(
+                playlist_history_last_played(track, duration_seconds=180.0, tags=tags)
+            )
+            self.assertNotIn(runtime_key, _PLAYLIST_HISTORY_LAST_PLAYED_CACHE)
+        finally:
+            with _PLAYLIST_HISTORY_PREFETCH_LOCK:
+                _PLAYLIST_HISTORY_PREFETCH_ROWS.pop(filename_key, None)
+
+    def test_v308_provisional_history_miss_is_not_cached_as_never(self) -> None:
+        track = Path("renamed-song.mp3")
+        tags = {"Artist": "Artist", "Song": "Song", "Album": "Album"}
+        runtime_key = playlist_history_runtime_key(track)
+        _PLAYLIST_HISTORY_LAST_PLAYED_CACHE.pop(runtime_key, None)
+        _PLAYLIST_FULL_HISTORY_BACKFILL_READY.clear()
+        try:
+            result = playlist_history_resolve_authoritative_loaded(
+                track,
+                duration_seconds=180.0,
+                tags=tags,
+                filename_candidates=(),
+                identity_played_at=None,
+                database=None,
+                allow_alias_repair=False,
+            )
+            self.assertIsNone(result)
+            self.assertNotIn(runtime_key, _PLAYLIST_HISTORY_LAST_PLAYED_CACHE)
+        finally:
+            _PLAYLIST_FULL_HISTORY_BACKFILL_READY.set()
 
     def test_positional_m3u_is_promoted_to_playlist_mode(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -46910,7 +49809,7 @@ class PlayWaveFileTests(unittest.TestCase):
 
     def test_emojimax_one_of_preserves_space_and_fan_is_plain(self) -> None:
         rendered = stylize_karaoke_with_emojimax("one of fan snakes", 1, True)
-        self.assertIn("❶  of", rendered)
+        self.assertIn("❶ of", rendered)
         self.assertIn("fan", rendered)
         self.assertIn("🐍🐍🐍", rendered)
         self.assertNotIn("🪭", rendered)
@@ -47221,10 +50120,19 @@ class PlayWaveFileTests(unittest.TestCase):
             self.assertTrue(scrobble_track_async(tags, 200.0, [(0.0, 100.1)], 123456))
             # 4) An early-skipped visit does not scrobble.
             self.assertFalse(scrobble_track_async(tags, 200.0, [(0.0, 40.0)], 123999))
-            # 5) Returning later is a new visit -> another Now Playing update.
+            # 5) V317's separately verified full-short-play path reaches the API
+            # even when malformed container duration defeats the percentage rule.
+            self.assertTrue(scrobble_track_async(
+                tags, 56.398072, [(0.940522, 14.210612)], 124000,
+                short_full_play=True,
+            ))
+            # 6) Returning later is a new visit -> another Now Playing update.
             self.assertTrue(update_lastfm_now_playing_async(tags, 200.0))
 
-        self.assertEqual(["now", "scrobble", "now"], [kind for kind, _payload in events])
+        self.assertEqual(
+            ["now", "scrobble", "scrobble", "now"],
+            [kind for kind, _payload in events],
+        )
 
     def test_v59_playback_lifecycle_now_playing_once_per_visit_source(self) -> None:
         source = Path(__file__).read_text(encoding="utf-8")
@@ -47465,7 +50373,7 @@ class PlayWaveFileTests(unittest.TestCase):
             rendered = ANSI_CSI_RE.sub("", stylize_karaoke_with_emojimax(
                 "This one is not the end", 1, True, force_emoji_when_enabled=True
             ))
-            self.assertIn("❶  is", rendered)
+            self.assertIn("❶ is", rendered)
             ending = ANSI_CSI_RE.sub("", stylize_karaoke_with_emojimax(
                 "the one", 1, True, force_emoji_when_enabled=True
             ))
@@ -47628,7 +50536,7 @@ class PlayWaveFileTests(unittest.TestCase):
     def test_v25_emojimax_whole_words_spacing_and_wind_context(self) -> None:
         self.assertEqual("❤️", stylize_karaoke_with_emojimax("loved", 1, True, 1.0, force_emoji_when_enabled=True))
         self.assertEqual("I ❤️ you", stylize_karaoke_with_emojimax("I loved you", 1, True, 1.0, force_emoji_when_enabled=True))
-        self.assertTrue(stylize_karaoke_with_emojimax("one thing", 1, True, 1.0, force_emoji_when_enabled=True).startswith("❶  thing"))
+        self.assertTrue(stylize_karaoke_with_emojimax("one thing", 1, True, 1.0, force_emoji_when_enabled=True).startswith("❶ thing"))
         self.assertFalse("because" in semantic)
         for phrase in ("wind up", "wind down", "wind north", "wind clockwise", "winding road"):
             self.assertNotIn("🌬️", stylize_karaoke_with_emojimax(phrase, 1, True, 1.0, force_emoji_when_enabled=True), phrase)
@@ -48180,7 +51088,7 @@ class PlayWaveFileTests(unittest.TestCase):
             stylize_web_karaoke_text("Abc", labels["Cursive"]),
         )
         html = _paf_web_html()
-        self.assertIn("Auto-size", html)
+        self.assertIn("Auto-Expand", html)
         self.assertIn("paf-web-karaoke-v238", html)
 
     def test_v237_playlist_browser_numbering_and_queue_contract(self) -> None:
@@ -51149,8 +54057,8 @@ class PlayWaveFileTests(unittest.TestCase):
         self.assertEqual([], tags)
         self.assertEqual("second-hotkey", reason)
 
-    def test_v89_force_distinct_forward_candidate_skips_duplicate_current_entries(self) -> None:
-        """If next resolves to the current file, advance again until a different existing file is found."""
+    def test_legacy_v89_distinct_candidate_helper_isolated_from_v309_playback(self) -> None:
+        """Keep the old helper testable for diagnosis, while V309 live playback deliberately never calls it."""
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             current = root / "A.mp3"
@@ -51171,16 +54079,12 @@ class PlayWaveFileTests(unittest.TestCase):
             self.assertTrue(same_audio_file_identity(selected, next_track))
             self.assertFalse(same_audio_file_identity(selected, current))
 
-    def test_v89_final_playback_boundary_has_explicit_next_next_guard(self) -> None:
-        """The last pre-FFplay boundary must independently reject a same-track forward transition."""
+    def test_v309_final_playback_boundary_allows_duplicate_playlist_slots(self) -> None:
+        """V309 must not silently skip a same-physical-file slot immediately before launch."""
         import inspect
         source = inspect.getsource(main)
-        boundary = source.index("Final playback-boundary invariant")
-        guard = source.index("force_distinct_forward_playlist_candidate(", boundary)
-        launch = source.index("external_album_art_window.update_track(current_audio)", boundary)
-        self.assertLess(boundary, guard)
-        self.assertLess(guard, launch)
-        self.assertIn("active_guard_order", source[boundary:launch])
+        self.assertNotIn("Final playback-boundary invariant", source)
+        self.assertNotIn("force_distinct_forward_playlist_candidate(\n                    active_guard_order", source)
 
     def test_v89_dense_one_row_metadata_first_colon_matches_play_and_dir(self) -> None:
         """The greedy one-line path must not start Act: at column zero anymore."""
@@ -51760,8 +54664,8 @@ class PlayWaveFileTests(unittest.TestCase):
             places=12,
         )
 
-    def test_v93_current_circled_number_gets_one_extra_safety_space_only_for_current_line(self) -> None:
-        """WT current double-height line gets four logical spaces after ❷; base Emojimaxx remains two."""
+    def test_v355_circled_number_bugfix_space_is_terminal_and_substitution_only(self) -> None:
+        """Only generated Windows-Terminal circled digits receive a safety cell."""
         base = stylize_karaoke_with_emojimax(
             "for two shillin'",
             1,
@@ -51769,9 +54673,69 @@ class PlayWaveFileTests(unittest.TestCase):
             1.0,
             force_emoji_when_enabled=True,
         )
-        self.assertIn("❷  shillin", base)
-        fixed = compensate_current_circled_number_spacing(base)
-        self.assertIn("❷    shillin", fixed)
+        self.assertIn("❷ shillin", base)
+        terminal = stylize_karaoke_with_emojimax(
+            "for two shillin'",
+            1,
+            True,
+            1.0,
+            force_emoji_when_enabled=True,
+            windows_terminal_compat=True,
+        )
+        self.assertIn("❷  shillin", terminal)
+        literal = stylize_karaoke_with_emojimax(
+            "literal ❷ qzv", 1, True, 1.0,
+            force_emoji_when_enabled=True,
+            windows_terminal_compat=True,
+        )
+        self.assertIn("literal ❷ qzv", literal)
+        self.assertNotIn("literal ❷  qzv", literal)
+        self.assertNotIn("ugly", semantic)
+
+    def test_v356_anniversary_auto_expand_and_unicode_survey_descriptions(self) -> None:
+        self.assertNotIn("anniversary", semantic)
+        html = _paf_web_html()
+        self.assertIn('id="karaokeAutoExpand">Auto-Expand', html)
+        self.assertNotIn('id="karaokeAutoExpand">Auto-size', html)
+        self.assertIn("dock.classList.toggle('auto-expand'", html)
+        self.assertIn('dock.clientHeight-8', html)
+        self.assertEqual("U+1F333 DECIDUOUS TREE", describe_unicode_sequence("🌳"))
+
+    def test_v357_survey_curation_and_requested_emojimax_replacements(self) -> None:
+        expected_kept = {
+            "melting": "🫠", "first": "🥇", "delighted": "🤩",
+            "spectacles": "👓", "roll": "🧻", "poo": "💩",
+            "poop": "💩", "shit": "💩", "crap": "💩",
+            "d.n.a.": "🧬", "dna": "🧬",
+        }
+        effective = dict(semantic)
+        effective.update(SEMANTIC_PHRASES)
+        for word, replacement in expected_kept.items():
+            self.assertEqual(replacement, effective.get(word), word)
+        self.assertEqual("🙈", semantic.get("unseen"))
+        self.assertEqual("🙊", semantic.get("unheard"))
+        self.assertEqual("🙊", semantic.get("unspoken"))
+        self.assertEqual("🎲🎲", semantic.get("dice"))
+        self.assertEqual("🐂💩", semantic.get("bullshit"))
+        self.assertEqual("🐂💩ing", semantic.get("bullshitting"))
+        self.assertEqual("🐂💩ed", semantic.get("bullshitted"))
+        self.assertFalse(any("◇" in replacement for replacement in effective.values()))
+        allowed_rejected_outputs = set(expected_kept) | {"unseen"}
+        survivors = {
+            word for word, replacement in effective.items()
+            if replacement in EMOJIMAX_V357_REJECTED_SURVEY_OUTPUTS
+        }
+        self.assertEqual(allowed_rejected_outputs, survivors)
+
+    def test_v361_removes_seem_and_uses_two_circled_digits_for_eighteen(self) -> None:
+        self.assertNotIn("seem", semantic)
+        self.assertEqual("①⑧", semantic.get("eighteen"))
+        self.assertEqual("①⑧", semantic.get("18"))
+        self.assertNotEqual("🔞", semantic.get("eighteen"))
+        self.assertEqual("①⑧", stylize_karaoke_with_emojimax("18", 1, True, 1.0, force_emoji_when_enabled=True))
+        self.assertEqual("①⑧", stylize_karaoke_with_emojimax("eighteen", 1, True, 1.0, force_emoji_when_enabled=True))
+        for glyph in ("①", "⑳", "㉑", "㉟", "㊱", "㊿", "❶", "❿"):
+            self.assertIn(glyph, CIRCLED_NUMBER_GLYPHS)
 
     def test_v93_dense_three_field_row_uses_available_width_for_album_year_genre(self) -> None:
         """V169 supersedes forced edge-filling: preserve all fields before spending slack."""
@@ -52013,6 +54977,11 @@ class PlayWaveFileTests(unittest.TestCase):
             "web-set:unknown:1",
         ]:
             self.assertFalse(paf_web_action_is_allowed(action), action)
+
+    def test_v344_popup_karaoke_web_actions_reach_the_playback_queue(self) -> None:
+        self.assertTrue(paf_web_action_is_allowed(ARTWORK_KARAOKE_TOGGLE))
+        self.assertTrue(paf_web_action_is_allowed(ARTWORK_KARAOKE_CONFIG))
+        self.assertTrue(paf_web_action_is_allowed(FLOATING_KARAOKE_CONFIG))
 
     def test_v95_web_has_winamp_wawi_style_separate_play_pause_stop_controls(self) -> None:
         """Transport should have independent Play/Pause/Stop buttons with classic beveled styling."""
@@ -52726,7 +55695,7 @@ class PlayWaveFileTests(unittest.TestCase):
             now = 1_000_000.0
             _PLAYLIST_RECENT_VISIT_CACHE.clear()
             _PLAYLIST_RECENT_VISIT_CACHE[lexical_path_key(sampled)] = now - 60.0
-            with mock.patch(
+            with mock.patch(__name__ + ".SHUFFLE_RECENT_AVOID_ENABLED", True), mock.patch(
                 __name__ + ".playlist_history_last_played_sync_candidate",
                 return_value=0.0,
             ):
@@ -52750,9 +55719,10 @@ class PlayWaveFileTests(unittest.TestCase):
                 {"PLAY_AUDIO_FILE_HISTORY_DB": str(database)},
             ):
                 _PLAYLIST_RECENT_VISIT_CACHE.clear()
-                self.assertTrue(playlist_shuffle_mark_visit(track, visited_at=now - 30.0))
-                _PLAYLIST_RECENT_VISIT_CACHE.clear()
-                loaded = load_recent_playlist_visits(now=now)
+                with mock.patch(__name__ + ".SHUFFLE_RECENT_AVOID_ENABLED", True):
+                    self.assertTrue(playlist_shuffle_mark_visit(track, visited_at=now - 30.0))
+                    _PLAYLIST_RECENT_VISIT_CACHE.clear()
+                    loaded = load_recent_playlist_visits(now=now)
                 self.assertEqual(now - 30.0, loaded[lexical_path_key(track)])
                 with playlist_history_connection() as connection:
                     self.assertEqual(
@@ -52762,6 +55732,31 @@ class PlayWaveFileTests(unittest.TestCase):
                         ).fetchone()[0],
                     )
 
+    def test_v307_recent_avoidance_is_disabled_by_default(self) -> None:
+        self.assertFalse(SHUFFLE_RECENT_AVOID_ENABLED)
+        current = Path("current.mp3")
+        proposed = Path("proposed.mp3")
+        _PLAYLIST_RECENT_VISIT_CACHE[lexical_path_key(proposed)] = time.time()
+        self.assertEqual(
+            proposed,
+            shuffle_candidate_avoiding_recent([current, proposed], current, proposed),
+        )
+
+    def test_v307_never_is_bucket_zero_and_known_dates_get_ten_deciles(self) -> None:
+        never = [(0.0, Path(f"never-{i}.mp3")) for i in range(37)]
+        known = [(float(i + 1), Path(f"known-{i:03d}.mp3")) for i in range(100)]
+        with mock.patch(__name__ + ".random.shuffle", side_effect=lambda values: None):
+            order = history_decile_shuffle_from_scores(never + known)
+        self.assertEqual({entry for _when, entry in never}, set(order[:37]))
+        # With 100 known entries, each played-history decile contains ten exact
+        # chronological ranks after the Never bucket.
+        for decile in range(10):
+            chunk = order[37 + decile * 10:37 + (decile + 1) * 10]
+            self.assertEqual(
+                [Path(f"known-{i:03d}.mp3") for i in range(decile * 10, (decile + 1) * 10)],
+                chunk,
+            )
+
     def test_v108_shuffle_cache_never_restores_stale_last_played_snapshot(self) -> None:
         """The five-hour queue cache cannot override newer live SQLite history."""
         import inspect
@@ -52770,7 +55765,9 @@ class PlayWaveFileTests(unittest.TestCase):
         self.assertNotIn('payload.get("last_played"', loader)
         self.assertNotIn('"last_played":', saver)
         main_source = inspect.getsource(main)
-        self.assertIn("load_recent_playlist_visits()", main_source)
+        self.assertFalse(SHUFFLE_RECENT_AVOID_ENABLED)
+        # The old visit hook may remain in the coordinator for compatibility, but
+        # playlist_shuffle_mark_visit() is a no-op while the top-level switch is off.
         self.assertIn("playlist_shuffle_mark_visit(current_audio)", main_source)
 
     def test_v108_alt3_prioritizes_hud_tags_translates_codes_and_uses_one_row(self) -> None:
@@ -52812,6 +55809,139 @@ class PlayWaveFileTests(unittest.TestCase):
         self.assertTrue(is_local_history_eligible(300.0, [(0.0, 60.0), (50.0, 100.0)]))
         self.assertFalse(is_lastfm_scrobble_eligible(300.0, [(0.0, 150.0)]))
         self.assertTrue(is_lastfm_scrobble_eligible(300.0, [(0.0, 150.1)]))
+
+    def test_v317_clean_full_short_play_logs_and_scrobbles_despite_bad_duration(self) -> None:
+        """A continuous short stream reaching EOF supersedes percentage rules."""
+        malformed_duration = 56.398072
+        actual_audio = [(0.940522, 14.210612)]
+        self.assertFalse(is_local_history_eligible(malformed_duration, actual_audio))
+        self.assertTrue(playback_ranges_cover_from_start(actual_audio, 0.940522))
+        short_full_play = is_short_track_full_play(
+            actual_audio, natural_completion=True, playback_start=0.940522,
+        )
+        self.assertTrue(short_full_play)
+        self.assertTrue(
+            is_local_history_eligible(
+                malformed_duration, actual_audio, full_play_completion=True,
+            )
+        )
+        self.assertFalse(is_lastfm_scrobble_eligible(malformed_duration, actual_audio))
+        self.assertTrue(
+            is_lastfm_scrobble_eligible(
+                malformed_duration, actual_audio, short_full_play=short_full_play,
+            )
+        )
+        self.assertFalse(
+            is_short_track_full_play(
+                [(5.0, 14.210612)], natural_completion=True, playback_start=0.940522,
+            )
+        )
+        self.assertFalse(
+            is_short_track_full_play(
+                actual_audio, natural_completion=False, playback_start=0.940522,
+            )
+        )
+        import inspect
+        source = inspect.getsource(play_audio_file)
+        self.assertIn('natural_completion = result == "completed" and process_returncode == 0', source)
+        self.assertIn('record_local_history_if_eligible(merged, force=full_play_completion)', source)
+        self.assertIn('short_full_play=short_full_play', source)
+
+    def test_v319_restores_off_but_keeps_two_unclear_emojimax_removals(self) -> None:
+        self.assertEqual(
+            {
+                "EMX317-001": ("off", "📴"),
+                "EMX317-002": ("blaming", "⛏"),
+                "EMX317-003": ("riding", "🏎️"),
+            },
+            EMOJIMAX_V317_REMOVALS_BY_UNDO_CODE,
+        )
+        self.assertEqual({"EMX319-001": ("off", "📴")}, EMOJIMAX_V319_RESTORATIONS_BY_UNDO_CODE)
+        self.assertEqual("📴", semantic.get("off"))
+        self.assertEqual(36, len(EMOJIMAX_V319_REMOVALS_BY_UNDO_CODE))
+        for word, _glyph in EMOJIMAX_V319_REMOVALS_BY_UNDO_CODE.values():
+            self.assertNotIn(word, semantic)
+        rendered_off = ANSI_CSI_RE.sub("", stylize_karaoke_with_emojimax(
+            "off", 1, True, force_emoji_when_enabled=True,
+        ))
+        self.assertEqual("📴", rendered_off)
+        for word in ("blaming", "riding"):
+            self.assertNotIn(word, semantic)
+            rendered = ANSI_CSI_RE.sub("", stylize_karaoke_with_emojimax(
+                word, 1, True, force_emoji_when_enabled=True,
+            ))
+            self.assertEqual(word, rendered)
+
+    def test_v319_volume_readout_blinks_three_times_and_visualizer_throbs(self) -> None:
+        changed_at = 100.0
+        phases = [
+            volume_inverse_blink_phase(changed_at + offset, changed_at)
+            for offset in (0.01, 0.15, 0.29, 0.43, 0.57, 0.71, 0.85)
+        ]
+        self.assertEqual([0, 1, 2, 3, 4, 5, -1], phases)
+        self.assertAlmostEqual(1.12, volume_visualizer_brightness_factor(100.25, changed_at, "up"), places=2)
+        self.assertAlmostEqual(0.88, volume_visualizer_brightness_factor(100.25, changed_at, "down"), places=2)
+        self.assertEqual(1.0, volume_visualizer_brightness_factor(100.51, changed_at, "up"))
+        self.assertIn("\033[7m", volume_status(15, "down", inverse=True))
+        self.assertNotIn("\033[7m", volume_status(15, "down"))
+        import inspect
+        source = inspect.getsource(play_audio_file)
+        self.assertGreaterEqual(source.count("current_volume_blink_phase ="), 2)
+        self.assertIn("volume_blink_started_at = now", source)
+        self.assertIn("if volume_blink_rearm_on_playback_start:", source)
+        self.assertIn("paint_volume_feedback_box", source)
+        self.assertIn("console_visualizer_volume_feedback_enabled", repr(paf_web_control_schema()))
+
+    def test_v319_composer_anchors_right_and_comment_is_equidistant(self) -> None:
+        width = 162
+        rows, _ = format_tag_panel({
+            "Artist": "Was (Not Was)",
+            "Song": "Walk The Dinosaur (Bruce's Prehistoric Dub)",
+            "Year": "1988",
+            "Genre": "Pop",
+            "Comment": "Bruce’s Prehistoric Dub",
+            "Composer": "Randy Jacobs;David Was;Don Was",
+        }, width=width, genre_emoji_enabled=False)
+        row = next(item for item in rows if all(label in item for label in ("Genre:", "Comment:", "Composer:")))
+        self.assertEqual(width, terminal_cell_width(row))
+        genre_end = row.index("Genre:") + len("Genre: Pop")
+        comment_start = row.index("Comment:")
+        comment_end = comment_start + len("Comment: Bruce’s Prehistoric Dub")
+        composer_start = row.index("Composer:")
+        self.assertLessEqual(abs((comment_start - genre_end) - (composer_start - comment_end)), 1)
+
+    def test_v320_missing_replaygain_is_a_disableable_red_hud_alert(self) -> None:
+        import inspect
+        schema = paf_web_control_schema()
+        control = next(item for item in schema["toggles"] if item["key"] == "alert_no_replaygain")
+        self.assertEqual("Red alert: no ReplayGain tag", control["label"])
+        self.assertIn("Uncheck to disable", control["tooltip"])
+        source = inspect.getsource(play_audio_file)
+        self.assertIn("🚨 REPLAYGAIN TAG MISSING 🚨", source)
+        self.assertIn("\\033[1;97;41m", source)
+
+    def test_v321_removes_four_requested_emojimaxx_associations(self) -> None:
+        self.assertEqual(
+            {
+                "EMX321-001": ("murmur", "🎟️"),
+                "EMX321-002": ("backwards", "⏪"),
+                "EMX321-003": ("stack", "📚"),
+                "EMX321-004": ("bursting", "🌀"),
+            },
+            EMOJIMAX_V321_REMOVALS_BY_UNDO_CODE,
+        )
+        for word, _glyph in EMOJIMAX_V321_REMOVALS_BY_UNDO_CODE.values():
+            self.assertNotIn(word, semantic)
+
+    def test_v323_learned_extra_tag_preserves_internal_spaces(self) -> None:
+        self.assertEqual(["pretty good"], normalize_attribute_tokens("pretty good"))
+        self.assertEqual(["very good", "best"], normalize_attribute_tokens("very   good,best"))
+        with tempfile.TemporaryDirectory() as temp:
+            audio = Path(temp) / "02_Test Song.mp3"
+            audio.write_bytes(b"x")
+            _target, rule, attrs = append_marked_attribute_rule(audio, "learned", ["pretty good"])
+            self.assertEqual(("learned", "pretty good"), attrs)
+            self.assertIn(":learned,pretty good", rule)
 
     def test_v109_cold_last_play_is_blank_until_owner_applies_lookup(self) -> None:
         """Unknown/pending is distinct from the definitive zero-row Never state."""
@@ -53085,9 +56215,10 @@ class PlayWaveFileTests(unittest.TestCase):
 
     def test_v254_web_karaoke_autosize_has_readable_height_floor(self) -> None:
         html = _paf_web_html()
-        self.assertRegex(html, r'const autoFloor=Math\.max\((132|142),Math\.min\((260|280),window\.innerHeight\*\.(19|20)\)\);')
-        self.assertIn('const manualHeight=manual>=autoFloor*.82?manual:0;', html)
-        self.assertIn('Math.max(autoFloor,Math.min(autoCeiling,preferred))', html)
+        self.assertIn('Auto-Expand', html)
+        self.assertIn('let available=Math.max(70,dock.clientHeight-8);', html)
+        self.assertIn('const assigned=Math.max(70,manualHeight,lyricReservedHeight||0,dock.clientHeight||0);', html)
+        self.assertIn("#lyricDock.auto-expand #lyric{width:100%;min-height:0;margin:0}", html)
 
     def test_v254_floating_lyrics_click_and_reveal_restore_readable_edit_box(self) -> None:
         import inspect
@@ -53151,6 +56282,54 @@ class PlayWaveFileTests(unittest.TestCase):
                     os.environ.pop("PLAY_AUDIO_FILE_HISTORY_DB", None)
                 else:
                     os.environ["PLAY_AUDIO_FILE_HISTORY_DB"] = old_override
+
+    def test_v304_structured_lastfm_alias_repairs_pipeline_album_track_pollution(self) -> None:
+        database = sqlite3.connect(":memory:")
+        _create_playlist_history_table(database)
+        _ensure_playlist_full_identity_table(database)
+        _ensure_playlist_visit_table(database)
+        database.execute(
+            "INSERT INTO played_history_identities_recent(artist_key,title_key,artist,title,duration_seconds,filename,played_at) VALUES (?,?,?,?,?,?,?)",
+            (
+                normalize_playlist_history_text("Agent Orange"),
+                normalize_playlist_history_text("Pipeline - Living in Darkness 10"),
+                "Agent Orange", "Pipeline - Living in Darkness 10", 1,
+                "pipeline - living in darkness 10", 1108328952.0,
+            ),
+        )
+        tags = {"Artist": "Agent Orange", "Song": "Pipeline", "Album": "Living In Darkness"}
+        with mock.patch(__name__ + ".probe_audio_raw_tags", return_value={"track": "10/13"}):
+            repaired = playlist_history_repair_polluted_lastfm_alias(
+                database,
+                Path(r"T:\mp3\Agent Orange\1981 - Living In Darkness\10_Pipeline [instrumental].mp3"),
+                duration_seconds=234,
+                tags=tags,
+            )
+        self.assertEqual(1108328952.0, repaired)
+        row = database.execute(
+            "SELECT played_at,duration_seconds FROM played_history_identities_recent WHERE artist_key=? AND title_key=?",
+            (normalize_playlist_history_text("Agent Orange"), normalize_playlist_history_text("Pipeline")),
+        ).fetchone()
+        self.assertEqual((1108328952.0, 234), row)
+        self.assertIsNotNone(database.execute(
+            "SELECT 1 FROM played_history_identities_recent WHERE title_key=?",
+            (normalize_playlist_history_text("Pipeline - Living in Darkness 10"),),
+        ).fetchone())
+        database.close()
+
+    def test_v304_structured_lastfm_alias_requires_album_and_track_proof(self) -> None:
+        self.assertTrue(_playlist_history_polluted_suffix_matches_current_track(
+            "Pipeline - Living in Darkness track 10", current_title="Pipeline",
+            current_album="Living In Darkness", track_number=10,
+        ))
+        self.assertFalse(_playlist_history_polluted_suffix_matches_current_track(
+            "Pipeline - Living in Darkness 10", current_title="Pipeline",
+            current_album="Living In Darkness", track_number=9,
+        ))
+        self.assertFalse(_playlist_history_polluted_suffix_matches_current_track(
+            "Pipeline - Living in Darkness 10", current_title="Pipeline",
+            current_album="Surfing To Some Fucked Up Shit", track_number=10,
+        ))
 
     def test_v241_history_csv_backfill_collapses_case_and_quotes(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -55124,7 +58303,7 @@ class PlayWaveFileTests(unittest.TestCase):
         self.assertIn("fast_twin_scaled_heights", render_source)
         self.assertIn("processing_style not in {62, 63}", render_source)
         html = _paf_web_html()
-        self.assertIn("Auto-size means EXPAND", html)
+        self.assertIn("Auto-Expand never makes a lyric smaller", html)
         self.assertIn("host.clientWidth<160", html)
         self.assertIn("Math.max(base,best*.988)", html)
         self.assertNotIn("let lo=8,hi=", html)
@@ -55232,7 +58411,7 @@ class PlayWaveFileTests(unittest.TestCase):
         block_start = source.index("shuffle_still_preparing = bool")
         block_end = source.index("previous_directory = current_audio.parent.resolve()", block_start)
         block = source[block_start:block_end]
-        self.assertIn("not playlist_ready_event.is_set()", block)
+        self.assertNotIn("random.choice(order)", block)
         self.assertIn("playlist_background_status_state[0] = None", block)
         # The loader/shuffler remains deliberately session-scoped: no transition join.
         self.assertIn("Intentionally no join: this session-scoped worker continues across song transitions.", source)
@@ -55312,7 +58491,7 @@ class PlayWaveFileTests(unittest.TestCase):
         import inspect
         self.assertGreaterEqual(int(PROGRAM_VERSION.removeprefix("V")), 264)
         self.assertTrue(any(token in PLAYER_BUILD_ID for token in ("v264-web-isolation", "v265-browser-owned", "v266-historical-transport")))
-        self.assertEqual(1000 if int(PROGRAM_VERSION.removeprefix("V")) >= 265 else 500, WEB_STATUS_POLL_MILLISECONDS)
+        self.assertEqual(200 if int(PROGRAM_VERSION.removeprefix("V")) >= 337 else (1000 if int(PROGRAM_VERSION.removeprefix("V")) >= 265 else 500), WEB_STATUS_POLL_MILLISECONDS)
         self.assertEqual(100, WEB_SPECTRUM_POLL_MILLISECONDS)
         server_source = inspect.getsource(PAFWebServer)
         player_source = inspect.getsource(play_audio_file)
@@ -55467,6 +58646,195 @@ class PlayWaveFileTests(unittest.TestCase):
         self.assertIn("ArtSlide:", full_source)
 
 
+    def test_v309_fixed_slot_queue_preserves_length_and_duplicates(self) -> None:
+        a, b = Path("A.mp3"), Path("B.mp3")
+        queue = [a, a, b]
+        for _ in range(20):
+            before = len(queue)
+            departed = queue[0]
+            queue = rotate_playlist_queue_after_play(queue, departed)
+            self.assertEqual(before, len(queue))
+        self.assertEqual(3, len(queue))
+        self.assertEqual(2, sum(1 for item in queue if item == a))
+
+    def test_v309_decensor_examples_and_non_asterisk_bypass(self) -> None:
+        self.assertEqual("fucking shit", decensor_lyric_line("f*cking sh*t"))
+        self.assertEqual("bitch", decensor_lyric_line("b*tch"))
+        self.assertEqual("ordinary lyric", decensor_lyric_line("ordinary lyric"))
+
+    def test_v309_emojimax_curations(self) -> None:
+        self.assertNotIn("sit", semantic)
+        self.assertEqual("💰🤑💰", semantic.get("rich"))
+        self.assertEqual("🎵", semantic.get("note"))
+        self.assertEqual("🎵", semantic.get("notes"))
+        self.assertEqual("✝", semantic.get("cross"))
+        self.assertEqual("💳", semantic.get("card"))
+        self.assertEqual("📅", semantic.get("date"))
+
+    def test_v326_completed_hud_rows_anchor_their_last_field(self) -> None:
+        width = 156
+        tags = dict(HUD_LAYOUT_SURVEY_CASES[0])
+        tags.pop("Last play")  # In live playback this belongs on the Play row.
+        plain_rows, _ansi_rows = format_tag_panel(tags, width=width)
+        labeled_rows = [row for row in plain_rows if hud_metadata_label_colons([row])]
+        self.assertGreaterEqual(len(labeled_rows), 2)
+        self.assertTrue(all(terminal_cell_width(row) == width for row in labeled_rows))
+        locations = dict(hud_metadata_label_colons(plain_rows))
+        self.assertEqual(locations["Album"], locations["Comment"])
+
+    def test_v327_emoji16_curations_box_cells_and_survey_aliases(self) -> None:
+        self.assertEqual("🌳🌳🌳", semantic.get("trees"))
+        self.assertEqual("🌲", semantic.get("evergreen"))
+        self.assertEqual("√", semantic.get("square"))
+        self.assertEqual(["square"], sorted(key for key, glyph in semantic.items() if glyph == "√"))
+        self.assertEqual("🪉", semantic.get("harp"))
+        self.assertEqual("🪏", semantic.get("shovel"))
+        self.assertEqual("🪏", semantic.get("dig"))
+        self.assertEqual("🪏ing", semantic.get("shoveling"))
+        self.assertEqual("🫆", semantic.get("fingerprint"))
+        self.assertNotIn("lie", semantic)
+        # The two-cell speaker glyph used to push only the middle border right.
+        box_rows = interaction_feedback_box_rows("🔈 20%  (-5)", 80)
+        self.assertEqual(1, len({terminal_cell_width(row) for row in box_rows}))
+        self.assertTrue(box_rows[1].endswith("│"))
+        with mock.patch(__name__ + ".run_emoji_symbol_survey", return_value=71):
+            for option in (
+                "--emoji-symbol-survey", "--emoji-survey", "--survey-emoji",
+                "--emojis-symbol-survey", "--emojis-survey", "--survey-emojis",
+            ):
+                self.assertEqual(71, main([option]))
+        with mock.patch(__name__ + ".run_hud_layout_survey", return_value=72):
+            for option in ("--hud-layout-survey", "--hud-survey", "--survey-hud"):
+                self.assertEqual(72, main([option]))
+
+    def test_v328_emoji_survey_lists_words_colors_pages_and_exports(self) -> None:
+        grouped = dict(emojimax_live_substitutions_by_glyph())
+        self.assertIn("tree", grouped["🌳"])
+        self.assertIn("trees", grouped["🌳🌳🌳"])
+        body, log_rows, summary = build_emoji_symbol_survey(
+            limit=10_000, terminal_columns=90,
+        )
+        joined_log = "\n".join(log_rows)
+        self.assertIn("words:", joined_log)
+        self.assertIn("fingerprint", joined_log)
+        self.assertIn("U+1F333 DECIDUOUS TREE", joined_log)
+        headings = [row for row in body if row.startswith("\033[38;2;") and "#" in row]
+        self.assertGreater(len(headings), 2)
+        self.assertNotEqual(headings[0].split("m", 1)[0], headings[1].split("m", 1)[0])
+        self.assertIn("effective word/phrase substitutions", summary[0])
+        import inspect
+        source = inspect.getsource(run_emoji_symbol_survey)
+        self.assertIn("page_playlist_analysis_table", source)
+        self.assertIn("Complete log:", source)
+        with tempfile.TemporaryDirectory() as temporary:
+            fake_error_log = Path(temporary) / "errors.log"
+            with mock.patch(__name__ + ".PAFPLAYER_ERROR_LOG", fake_error_log), mock.patch(
+                __name__ + ".page_playlist_analysis_table"
+            ) as pager:
+                self.assertEqual(0, run_emoji_symbol_survey())
+            reports = list(Path(temporary).glob("emoji-symbol-survey-*.log"))
+            self.assertEqual(1, len(reports))
+            self.assertIn("words:", reports[0].read_text(encoding="utf-8"))
+            self.assertIn("Complete log:", "\n".join(pager.call_args.args[0]))
+
+    def test_v329_hud_survey_compares_colored_placement_algorithms_only(self) -> None:
+        tags = dict(HUD_LAYOUT_SURVEY_CASES[0])
+        width = 118
+        expected_labels = {
+            "Act:", "Song:", "Album:", "Year:", "Genre:",
+            "Comment:", "Original artist:", "Composer:",
+        }
+        layouts: dict[str, tuple[str, ...]] = {}
+        for algorithm in HUD_LAYOUT_SURVEY_ALGORITHMS:
+            rows = render_hud_layout_survey_algorithm(tags, width, algorithm)
+            layouts[algorithm] = rows
+            visible = "\n".join(ANSI_CSI_RE.sub("", row) for row in rows)
+            self.assertTrue(all(label in visible for label in expected_labels))
+            self.assertTrue(all(terminal_cell_width(ANSI_CSI_RE.sub("", row)) <= width for row in rows))
+            self.assertTrue(all("\033[" in row for row in rows))
+        self.assertGreaterEqual(len(set(layouts.values())), 3)
+        import inspect
+        source = inspect.getsource(run_hud_layout_survey)
+        self.assertNotIn("dense baseline", source)
+        self.assertIn("choose placement only", source)
+        self.assertIn("Main reason", source)
+
+    def test_v330_live_inputs_suppress_track_artwork_without_losing_settings(self) -> None:
+        self.assertGreaterEqual(int(PROGRAM_VERSION.removeprefix("V")), 330)
+        self.assertTrue(visualizer_track_artwork_allowed(1, False))
+        self.assertTrue(visualizer_track_artwork_allowed(1, True))
+        for source_number in (2, 3, 4):
+            self.assertFalse(visualizer_track_artwork_allowed(source_number, False))
+            self.assertFalse(visualizer_track_artwork_allowed(source_number, True))
+        self.assertTrue(visualizer_track_artwork_allowed(5, False))
+        self.assertFalse(visualizer_track_artwork_allowed(5, True))
+
+        import inspect
+        source = inspect.getsource(play_audio_file)
+        self.assertIn("or not track_artwork_allowed", source)
+        self.assertIn("artwork_microtiles_enabled=bool(track_artwork_allowed", source)
+        self.assertIn("if track_artwork_allowed\n                        and ART_COLOR_VISUALIZER_REPRESENTATION", source)
+        self.assertGreaterEqual(
+            source.count("visualizer_track_artwork_allowed(visualizer_input_source, False)"),
+            2,
+        )
+        self.assertIn("clear_region(LYRIC_ROW, max(1, LYRIC_ROWS + drcs_rows))", source)
+        self.assertIn("reset_visualizer_transport_cache()", source)
+
+    def test_v331_frequency_warp_compacts_low_end_and_repeats_feedback(self) -> None:
+        self.assertGreaterEqual(int(PROGRAM_VERSION.removeprefix("V")), 331)
+        self.assertAlmostEqual(0.0, frequency_warp_source_position(0.0), places=6)
+        self.assertAlmostEqual(0.55, frequency_warp_source_position(0.55), places=6)
+        self.assertAlmostEqual(0.70, frequency_warp_source_position(0.85), places=6)
+        self.assertAlmostEqual(1.0, frequency_warp_source_position(1.0), places=6)
+        values = [frequency_warp_source_position(i / 1000) for i in range(1001)]
+        self.assertTrue(all(a <= b for a, b in zip(values, values[1:])))
+        self.assertLess(frequency_warp_source_position(0.30), 0.40)
+        import inspect
+        source = inspect.getsource(play_audio_file)
+        self.assertGreaterEqual(source.count("Frequency warp {'enabled' if frequency_warp_enabled else 'disabled'}"), 2)
+        self.assertIn("Cubic Hermite", inspect.getsource(frequency_warp_source_position))
+
+    def test_v332_forget_emojimax_removals_are_explicit_and_reversible(self) -> None:
+        self.assertGreaterEqual(int(PROGRAM_VERSION.removeprefix("V")), 332)
+        self.assertNotIn("forget", semantic)
+        self.assertNotIn("forgets", semantic)
+        self.assertNotIn("forgetting", semantic)
+        self.assertEqual(
+            ("forget", "🗃️"),
+            EMOJIMAX_V332_REMOVALS_BY_UNDO_CODE["EMX332-001"],
+        )
+
+    def test_v333_web_decensor_controls_follow_their_destination_sections(self) -> None:
+        self.assertGreaterEqual(int(PROGRAM_VERSION.removeprefix("V")), 333)
+        import inspect
+        source = inspect.getsource(_paf_web_html)
+        self.assertIn("const karaokeKeys=['karaoke_emojimax','decensor_console_karaoke'];", source)
+        self.assertIn("const webKaraokeKeys=['cursive_fix'];", source)
+        self.assertIn("item.key==='decensor_artwork_lyrics'", source)
+        self.assertIn("item.key==='decensor_floating_lyrics'", source)
+
+    def test_v334_missing_playlist_is_a_warning_and_clean_return(self) -> None:
+        self.assertGreaterEqual(int(PROGRAM_VERSION.removeprefix("V")), 334)
+        import inspect
+        source = inspect.getsource(main)
+        self.assertIn("Playlist file not found; nothing to play", source)
+        self.assertIn("append_pafplayer_trace(\"playlist.missing\"", source)
+        self.assertIn("return 0", source[source.index("Playlist file not found; nothing to play"):])
+
+    def test_v335_web_artwork_and_floating_sections_have_live_controls_and_config_actions(self) -> None:
+        self.assertGreaterEqual(int(PROGRAM_VERSION.removeprefix("V")), 335)
+        html = _paf_web_html()
+        self.assertIn('id="artworkPopupSection"', html)
+        self.assertIn('id="floatingLyricsSection"', html)
+        self.assertIn('id="artworkPopupMasterToggle"', html)
+        self.assertIn('id="artworkPopupKaraokeToggle"', html)
+        self.assertIn('id="floatingLyricsMasterToggle"', html)
+        import inspect
+        source = inspect.getsource(_paf_web_html)
+        self.assertIn("action('artwork-karaoke-config')", source)
+        self.assertIn("action('floating-karaoke-config')", source)
+        self.assertIn("lyrics_mode=(external_album_art_window.lyrics_mode", inspect.getsource(play_audio_file))
 
 
 def run_unit_tests() -> int:
@@ -55496,6 +58864,347 @@ def run_emoji_display_test() -> int:
             f"\033[38;2;255;215;120m{replacement}\033[0m  "
             f"\033[2;90mcells={terminal_cell_width(replacement):>2} {codepoints}\033[0m"
         )
+    return 0
+
+
+def emojimax_live_substitutions_by_glyph() -> list[tuple[str, tuple[str, ...]]]:
+    """Return every live glyph/output with all words or phrases it replaces."""
+    merged = {str(word): str(glyph) for word, glyph in semantic.items()}
+    # Phrase substitutions run first and explicitly win duplicate keys, so the
+    # survey must report that same effective mapping rather than only the bulk
+    # single-word dictionary used by the old incidence counter.
+    merged.update({str(phrase): str(glyph) for phrase, glyph in SEMANTIC_PHRASES.items()})
+    words_by_glyph: dict[str, list[str]] = {}
+    for word, glyph in merged.items():
+        words_by_glyph.setdefault(glyph, []).append(word)
+    return sorted(
+        (
+            (glyph, tuple(sorted(words, key=lambda word: (word.casefold(), word))))
+            for glyph, words in words_by_glyph.items()
+        ),
+        key=lambda item: (-len(item[1]), item[0]),
+    )
+
+
+def emoji_symbol_survey_log_path(now_value: datetime | None = None) -> Path:
+    """Choose a collision-safe timestamped report under PAFPlayer's log root."""
+    stamp = (now_value or datetime.now()).strftime("%Y%m%d-%H%M%S")
+    base = PAFPLAYER_ERROR_LOG.parent / f"emoji-symbol-survey-{stamp}.log"
+    if not base.exists():
+        return base
+    for collision in range(1, 10_000):
+        candidate = base.with_name(f"{base.stem} ({collision}){base.suffix}")
+        if not candidate.exists():
+            return candidate
+    raise FileExistsError(f"Could not choose an unused emoji-survey log name beside {base}")
+
+
+def describe_unicode_sequence(value: str) -> str:
+    """Pair every codepoint with its Unicode description for survey output."""
+    return " + ".join(
+        f"U+{ord(character):04X} {unicodedata.name(character, 'UNNAMED CHARACTER')}"
+        for character in str(value)
+    )
+
+
+def build_emoji_symbol_survey(
+    *, limit: int = 100, terminal_columns: int = 120,
+) -> tuple[list[str], list[str], list[str]]:
+    """Build ANSI pager rows and ANSI-free complete export rows."""
+    entries = emojimax_live_substitutions_by_glyph()[:max(0, int(limit))]
+    terminal_columns = max(50, int(terminal_columns))
+    colored_rows: list[str] = []
+    log_rows = [
+        f"PAFPlayer {PROGRAM_VERSION} Emojimaxx symbol survey",
+        f"Showing: {len(entries)} most-used live substitution outputs",
+        "",
+    ]
+    entry_count = max(1, len(entries))
+    for index, (glyph, words) in enumerate(entries, start=1):
+        heading = f"#{index:03d}  uses={len(words):3d}  {glyph}"
+        codepoint_description = f"  code: {describe_unicode_sequence(glyph)}"
+        words_text = ", ".join(words)
+        wrapped_codepoints = wrap_to_cells(codepoint_description, max(20, terminal_columns - 2)) or [codepoint_description]
+        wrapped_words = wrap_to_cells(words_text, max(20, terminal_columns - 9)) or [""]
+        hue = (index - 1) / entry_count
+        red, green, blue = (
+            round(component * 255)
+            for component in colorsys.hsv_to_rgb(hue, 0.58, 1.0)
+        )
+        color = f"\033[38;2;{red};{green};{blue}m"
+        colored_rows.append(f"{color}{heading}\033[0m")
+        for codepoint_index, line in enumerate(wrapped_codepoints):
+            prefix = "" if codepoint_index == 0 else "        "
+            colored_rows.append(f"{color}{prefix}{line}\033[0m")
+        for word_index, line in enumerate(wrapped_words):
+            prefix = "  words: " if word_index == 0 else "         "
+            colored_rows.append(f"{color}{prefix}{line}\033[0m")
+        colored_rows.append("")
+        log_rows.extend((heading, codepoint_description, f"  words: {words_text}", ""))
+    summary = (
+        f"{len(entries)} glyph/output entries; "
+        f"{sum(len(words) for _glyph, words in entries):,} effective word/phrase substitutions"
+    )
+    return colored_rows, log_rows, [summary]
+
+
+def run_emoji_symbol_survey() -> int:
+    """Page the top 100 glyphs with their words and export the full report."""
+    columns = max(50, shutil.get_terminal_size((120, 30)).columns - 1)
+    body, log_rows, summary_rows = build_emoji_symbol_survey(
+        limit=100,
+        terminal_columns=columns,
+    )
+    destination = emoji_symbol_survey_log_path()
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text("\n".join(log_rows + summary_rows) + "\n", encoding="utf-8")
+    except OSError:
+        # A locked-down machine may deny C:\logs.  Preserve the report beside
+        # the launched script using another collision-safe timestamped name.
+        fallback = Path(__file__).resolve().parent / destination.name
+        collision = 0
+        while fallback.exists():
+            collision += 1
+            fallback = fallback.with_name(
+                f"{destination.stem} ({collision}){destination.suffix}"
+            )
+        fallback.write_text("\n".join(log_rows + summary_rows) + "\n", encoding="utf-8")
+        destination = fallback
+
+    header = [
+        "\033[1;96mPAFPlayer Emojimaxx symbol survey\033[0m",
+        f"\033[1;38;2;255;215;105mComplete log: {destination}\033[0m",
+        "\033[2;90mEach entry lists every live word/phrase that currently produces that exact output.\033[0m",
+        "",
+    ]
+    page_playlist_analysis_table(header, body, summary_rows[0])
+    return 0
+
+
+HUD_LAYOUT_SURVEY_CASES: tuple[dict[str, str], ...] = (
+    {
+        "Artist": "Nuclear Bubble Wrap", "Song": "The Wolfman",
+        "Album": "Ween Appreciation Society – Mutilated Hits (Vol. 1)",
+        "Year": "2016", "Genre": "Psychedelic Rock",
+        "Comment": "Ween cover", "Original artist": "Ween", "Composer": "Ween",
+        "Last play": "Aug 11",
+    },
+    {
+        "Artist": "Was (Not Was)", "Song": "Walk The Dinosaur (Bruce's Prehistoric Dub)",
+        "Album": "What Up, Dog?", "Year": "1988", "Genre": "Pop",
+        "Comment": "Bruce's Prehistoric Dub", "Composer": "Randy Jacobs; David Was; Don Was",
+        "Last play": "Aug 11",
+    },
+    {
+        "Artist": "The Undead", "Song": "London Dungeon (by The Misfits)",
+        "Album": "12 Hits From Hell Uncovered (Misfits songs)", "Year": "2007",
+        "Genre": "Punk", "Original artist": "The Misfits", "Composer": "D. Sparkles",
+        "Last play": "Never",
+    },
+)
+
+
+HUD_LAYOUT_SURVEY_ALGORITHMS = (
+    "production-priority",
+    "balanced-gaps",
+    "compact-left",
+    "row-right-anchor",
+)
+
+
+def _hud_survey_fields(tags: dict[str, str]) -> list[tuple[str, str, str]]:
+    definitions = (
+        ("Act", "Artist", "artist"),
+        ("Song", "Song", "song"),
+        ("Album", "Album", "normal"),
+        ("Year", "Year", "normal"),
+        ("Genre", "Genre", "genre"),
+        ("Comment", "Comment", "comment"),
+        ("Original artist", "Original artist", "normal"),
+        ("Composer", "Composer", "normal"),
+    )
+    return [
+        (label, str(tags.get(source, "") or ""), kind)
+        for label, source, kind in definitions
+        if str(tags.get(source, "") or "")
+    ]
+
+
+def _hud_survey_render_field(label: str, value: str, kind: str) -> str:
+    label_text = f"\033[2;90m{label}:\033[0m "
+    if kind == "artist":
+        value_text = f"\033[38;2;235;45;175m{value}\033[0m"
+    elif kind == "song":
+        value_text = f"\033[38;2;30;225;205m{value}\033[0m"
+    elif kind == "comment":
+        value_text = f"\033[3;38;2;175;195;215m{value}\033[0m"
+    else:
+        value_text = f"\033[38;2;175;195;215m{value}\033[0m"
+    return label_text + value_text
+
+
+def _hud_survey_partition_fields(
+    fields: list[tuple[str, str, str]], width: int, *, balanced: bool,
+) -> list[list[tuple[str, str, str]]]:
+    """Partition ordered fields without dropping or wrapping any value."""
+    widths = [len(label) + 2 + terminal_cell_width(value) for label, value, _kind in fields]
+    if not balanced:
+        rows: list[list[tuple[str, str, str]]] = []
+        current: list[tuple[str, str, str]] = []
+        used = 2
+        for field, cells in zip(fields, widths):
+            added = cells + (HUD_LAYOUT_GAP_CELLS if current else 0)
+            if current and used + added > width:
+                rows.append(current)
+                current = []
+                used = 2
+                added = cells
+            current.append(field)
+            used += added
+        if current:
+            rows.append(current)
+        return rows
+
+    # Dynamic programming: first minimize physical row count, then minimize
+    # squared unused width so no row is needlessly sparse beside an overfull one.
+    count = len(fields)
+    best: list[tuple[tuple[int, int], list[list[tuple[str, str, str]]]] | None] = [None] * (count + 1)
+    best[count] = ((0, 0), [])
+    for start in range(count - 1, -1, -1):
+        used = 2
+        for end in range(start, count):
+            used += widths[end] + (HUD_LAYOUT_GAP_CELLS if end > start else 0)
+            if used > width:
+                break
+            tail = best[end + 1]
+            if tail is None:
+                continue
+            tail_score, tail_rows = tail
+            score = (1 + tail_score[0], (width - used) ** 2 + tail_score[1])
+            candidate_rows = [fields[start:end + 1]] + tail_rows
+            if best[start] is None or score < best[start][0]:
+                best[start] = (score, candidate_rows)
+    return best[0][1] if best[0] is not None else [[field] for field in fields]
+
+
+def render_hud_layout_survey_algorithm(
+    tags: dict[str, str], width: int, algorithm: str,
+) -> tuple[str, ...]:
+    """Render one placement algorithm with identical colors and typography."""
+    width = max(60, int(width))
+    if algorithm == "production-priority":
+        cleaned = dict(tags)
+        cleaned.pop("Last play", None)
+        _plain, ansi = format_tag_panel(
+            cleaned, width=width, genre_emoji_enabled=False,
+            smart_alignment_enabled=True,
+        )
+        return tuple(ansi)
+
+    fields = _hud_survey_fields(tags)
+    rows = _hud_survey_partition_fields(
+        fields,
+        width,
+        balanced=(algorithm == "balanced-gaps"),
+    )
+    output: list[str] = []
+    for row in rows:
+        cells = [len(label) + 2 + terminal_cell_width(value) for label, value, _kind in row]
+        starts: list[int] = []
+        if algorithm == "balanced-gaps" and len(row) > 1:
+            available_gap = max(2 * (len(row) - 1), width - 2 - sum(cells))
+            base, remainder = divmod(available_gap, len(row) - 1)
+            gaps = [base + (1 if index < remainder else 0) for index in range(len(row) - 1)]
+        else:
+            gaps = [HUD_LAYOUT_GAP_CELLS] * max(0, len(row) - 1)
+        cursor = 2
+        for index, cells_used in enumerate(cells):
+            starts.append(cursor)
+            cursor += cells_used
+            if index < len(gaps):
+                cursor += gaps[index]
+        if algorithm == "row-right-anchor" and starts:
+            shift = max(0, width - (starts[-1] + cells[-1]))
+            starts = [start + shift for start in starts]
+
+        ansi_row = ""
+        visible = 0
+        for (label, value, kind), start in zip(row, starts):
+            ansi_row += " " * max(0, start - visible)
+            ansi_row += _hud_survey_render_field(label, value, kind)
+            visible = start + len(label) + 2 + terminal_cell_width(value)
+        output.append(ansi_row.rstrip())
+    return tuple(output)
+
+
+def run_hud_layout_survey() -> int:
+    """Pairwise-test placement algorithms while holding visual styling fixed."""
+    width = max(80, shutil.get_terminal_size((120, 30)).columns - 1)
+    trials = (
+        (0, "production-priority", "balanced-gaps"),
+        (1, "compact-left", "production-priority"),
+        (2, "production-priority", "row-right-anchor"),
+        (0, "compact-left", "balanced-gaps"),
+        (1, "row-right-anchor", "balanced-gaps"),
+        (2, "row-right-anchor", "compact-left"),
+    )
+    answers: list[tuple[int, str, str, str, str]] = []
+    reason_names = {
+        "1": "fewer/better rows",
+        "2": "right edge",
+        "3": "colon alignment",
+        "4": "spacing/symmetry",
+        "5": "overall readability",
+        "": "unspecified",
+    }
+    for trial_index, (case_index, algorithm_a, algorithm_b) in enumerate(trials, start=1):
+        tags = dict(HUD_LAYOUT_SURVEY_CASES[case_index])
+        if getattr(sys.stdout, "isatty", lambda: False)():
+            write_console("\033[2J\033[H")
+        print("\033[1;96mPAFPlayer HUD placement-algorithm survey\033[0m")
+        print("Colors, typography, labels, metadata and available width are identical.")
+        print(f"Trial {trial_index}/{len(trials)} — choose placement only; S skips, Q stops.\n")
+        last_play = str(tags.get("Last play", "") or "")
+        filename = str(tags.get("Song", "Example track")) + ".flac"
+        header_left = f"▶ Play: {filename}"
+        header_right = f"Last play: {last_play}" if last_play else ""
+        header_gap = max(2, width - terminal_cell_width(header_left) - terminal_cell_width(header_right))
+        print(f"\033[38;2;100;235;150m{header_left}\033[0m" + " " * header_gap + f"\033[38;2;175;195;215m{header_right}\033[0m")
+        print("\033[1;38;2;255;210;100mA\033[0m")
+        for row in render_hud_layout_survey_algorithm(tags, width, algorithm_a):
+            print(row)
+        print("\n\033[1;38;2;255;210;100mB\033[0m")
+        for row in render_hud_layout_survey_algorithm(tags, width, algorithm_b):
+            print(row)
+        while True:
+            answer = input("\nWhich placement is better [A/B/S/Q]? ").strip().upper()[:1]
+            if answer in {"A", "B", "S", "Q"}:
+                break
+        if answer == "Q":
+            break
+        reason = ""
+        if answer in {"A", "B"}:
+            reason = input(
+                "Main reason [1 rows, 2 right edge, 3 colons, 4 spacing/symmetry, 5 overall, Enter skip]? "
+            ).strip()[:1]
+            if reason not in reason_names:
+                reason = ""
+        answers.append((trial_index, algorithm_a, algorithm_b, answer, reason_names[reason]))
+
+    wins = {algorithm: 0 for algorithm in HUD_LAYOUT_SURVEY_ALGORITHMS}
+    for _trial, algorithm_a, algorithm_b, answer, _reason in answers:
+        if answer == "A":
+            wins[algorithm_a] += 1
+        elif answer == "B":
+            wins[algorithm_b] += 1
+    encoded = "; ".join(
+        f"T{trial}:A={algorithm_a},B={algorithm_b},pick={answer},why={reason}"
+        for trial, algorithm_a, algorithm_b, answer, reason in answers
+    )
+    scoreboard = ", ".join(f"{algorithm}={wins[algorithm]}" for algorithm in HUD_LAYOUT_SURVEY_ALGORITHMS)
+    print("\n\033[1;96mAlgorithm wins:\033[0m " + scoreboard)
+    print("\033[1;96mPaste this response back to Codex:\033[0m " + encoded)
     return 0
 
 
@@ -56257,6 +59966,13 @@ def run_multichannel_speaker_test(which: str = "suite") -> int:
 def main(argv: list[str] | None = None) -> int:
     """Run unit tests or preview the single supplied audio filename."""
     arguments = list(sys.argv[1:] if argv is None else argv)
+    # Survey switches accept natural singular/plural spellings in either order.
+    # Keep this normalization local to the survey dispatch so an audio filename
+    # containing "emojis" is never rewritten.
+    survey_argument = (
+        arguments[0].casefold().replace("emojis", "emoji")
+        if len(arguments) == 1 else ""
+    )
     if arguments in (["--version"], ["--which-script"]):
         print(f"play_audio_file {PROGRAM_RELEASE_LABEL} build {PLAYER_BUILD_ID}")
         print(Path(__file__).resolve())
@@ -56265,6 +59981,27 @@ def main(argv: list[str] | None = None) -> int:
         return run_unit_tests()
     if arguments in (["--emoji-display-test"], ["-e"]):
         return run_emoji_display_test()
+    if arguments and arguments[0] in {"--emojimaxx", "--emojimax"}:
+        if len(arguments) != 2:
+            print('💥 ERROR: --emojimaxx requires exactly one quoted text argument.', file=sys.stderr)
+            return 2
+        # This is deliberately a preview-only path: it has no player, window,
+        # history, or web-server side effects.  Match the console renderer so
+        # Windows Terminal-only glyph spacing workarounds are visible here.
+        print(stylize_karaoke_with_emojimax(
+            arguments[1], 1, True, 1.0,
+            force_emoji_when_enabled=True,
+            windows_terminal_compat=True,
+        ))
+        return 0
+    if survey_argument in {
+        "--emoji-symbol-survey", "--emoji-survey", "--survey-emoji",
+    }:
+        return run_emoji_symbol_survey()
+    if survey_argument in {
+        "--hud-layout-survey", "--hud-survey", "--survey-hud",
+    }:
+        return run_hud_layout_survey()
     if arguments == ["--speaker-test-5.1"]:
         return run_multichannel_speaker_test("5.1")
     if arguments == ["--speaker-test-7.1"]:
@@ -56337,6 +60074,9 @@ def main(argv: list[str] | None = None) -> int:
         usage_line("First-run library setup", r"if C:\mp3 is missing, type collection path or F picker; create C:\mp3 + C:\music junctions and C:\mp3\lists")
         usage_line("-t, --unit-tests", "run embedded tests")
         usage_line("-e, --emoji-display-test", "test emojimaxxifying of text")
+        usage_line('--emojimaxx "text"', "preview Emojimaxx substitutions and exit", note="alias: --emojimax")
+        usage_line("--emoji-symbol-survey / --emoji-survey / --survey-emoji", "paged top-100 glyph incidence + every substituted word/phrase + timestamped log; emoji/emojis are equivalent")
+        usage_line("--hud-layout-survey / --hud-survey / --survey-hud", "pairwise colored comparison of four HUD field-placement algorithms with reason-coded results")
         usage_line("--speaker-test-5.1 / --speaker-test-7.1", "play sequential discrete-channel HDMI speaker bursts; no music file required")
         usage_line("--speaker-test-suite", "test 5.1 back/side + 7.1 at 48/96/192 kHz for Windows/HDMI routing diagnosis")
         usage_line("--process-compound-subtitle-and-lyric-file [DIR]", "scan SRT/LRC/TXT collection; write emoji-code-snippet.txt and open it in TXT editor")
@@ -56351,7 +60091,7 @@ def main(argv: list[str] | None = None) -> int:
         usage_line("--trim-silence-keep=SECONDS", "quiet safety pad retained at each detected edge", f"{TRIM_EDGE_SILENCE_KEEP_SECONDS:g}s")
         usage_line("-r, --random-file [directory]", "random file in one folder")
         usage_line("-R, --random-file-recursive [directory]", "random downward folder walk")
-        usage_line("-p, --playlist FILE", "persistent history-biased shuffled queue; avoids tracks played or merely visited <3h when another candidate exists; departed tracks rotate to tail", "shuffle")
+        usage_line("-p, --playlist FILE", "history shuffle: Never bucket first, then 10 oldest→newest known-play deciles; departed tracks rotate to tail", "shuffle")
         usage_line("--shuffle-expiration-in-hours=HOURS", "reuse the persistent shuffled queue until its original build reaches this age", f"{SHUFFLE_EXPIRATION_IN_HOURS:g}h", "rotation does not reset expiration")
         usage_line("--marqee-animation-if-longer-than=20", "animate window-title marquee above this length", str(MARQUEE_ANIMATION_IF_LONGER_THAN))
         usage_banner("⌨️", "KEYSTROKES")
@@ -56388,6 +60128,7 @@ def main(argv: list[str] | None = None) -> int:
         usage_line("Album art rotation", "when not idle, occasionally crossfade among cover/back/related images using cover-heavy dwell weights")
         usage_line("Artwork Lyrics button", "three-way cycle: over artwork → floating → both; both destinations may render the same cue simultaneously")
         usage_line("Floating lyrics", "drag a visible letter to move; hold Ctrl to grab transparent space or resize from an edge/corner")
+        usage_line("Alt+L", "toggle effective learned tag; HUD 𝓛 is muted green/red")
         usage_line("Ctrl+Alt+L", "mark learned; extras save ONLY on Enter; 10s untouched or 30s typing-idle/Esc/second hotkey discard extras; R removes ~16s")
         usage_line("Ctrl+O", "open another playlist with the Windows picker; current session cleans up, then relaunches in the same console")
         usage_line("Ctrl+U / Ctrl+B", "choose URL(s) from track metadata; a single URL opens immediately")
@@ -56544,6 +60285,7 @@ def main(argv: list[str] | None = None) -> int:
         print(r"  play_audio_file.py --now-playing C:\temp\paf-now-playing.txt C:\mp3\song.mp3")
         print(r"  play_audio_file.py --suppress-attribute-management C:\mp3\song.mp3")
         print(r"  While playing: Ctrl+Alt+S force-logs + scrobbles; if this visit already scrobbled, press it a second time within the confirmation window to force a duplicate.")
+        print(r"  While playing: Alt+L toggles the effective learned tag; HUD 𝓛 is muted green when learned and muted red otherwise; Ctrl+Alt+L keeps the richer learned+extras workflow.")
         print(r"  While playing: Ctrl+Alt+L marks learned; extra tags save ONLY if you press Enter. Untouched 10s timeout, 30s typing-idle timeout, Esc, or second Ctrl+Alt+L discard typed extras.")
         print(r"  While playing: Ctrl+A edits attrib.lst; after an Already learned result it walks upward to the nearest existing parent attrib.lst if the local one is absent; otherwise second Ctrl+A creates local.")
         print(r"  While playing: Ctrl+E opens lyric sidecars; D reloads them, writes embedded lyric tags, and verifies readback.")
@@ -56582,6 +60324,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     load_mp3_base_attribute_rules(MP3_BASE_ATTRIBUTES_PATH)
     persisted_settings = load_player_settings()
+    # V310: bundled releases already contain this. A third-party single-file
+    # install gets one explicit choice of same-folder vs clairecjs_utils\.
+    ensure_clairecjs_dependency("claire_audio_processing", interactive=True)
     global ART_COLOR_VISUALIZER_REPRESENTATION, ART_COLOR_VISUALIZER_BAR_STRENGTH, ART_COLOR_VISUALIZER_BLACK_STRENGTH, ART_COLOR_VISUALIZER_KARAOKE_SIDES, ART_COLOR_VISUALIZER_KARAOKE
     ART_COLOR_VISUALIZER_REPRESENTATION = ART_COLOR_VISUALIZER_REPRESENTATIONS[min(3, max(0, persisted_settings.get("ArtColorRepresentation", 0)))]
     ART_COLOR_VISUALIZER_BAR_STRENGTH = persisted_settings.get("ArtColorBarStrength", 70) / 100.0
@@ -57228,7 +60973,19 @@ def main(argv: list[str] | None = None) -> int:
         karaoke_style_state = [persisted_settings['KaraokeStyle']]
         karaoke_treatment_state = [persisted_settings['KaraokeTreatment']]
         karaoke_emojimax_state = [bool(persisted_settings['KaraokeEmojimax'])]
+        decensor_console_karaoke_state = [bool(persisted_settings.get('DecensorConsoleKaraoke', 0))]
+        decensor_artwork_lyrics_state = [bool(persisted_settings.get('DecensorArtworkLyrics', 0))]
+        decensor_floating_lyrics_state = [bool(persisted_settings.get('DecensorFloatingLyrics', 0))]
         console_karaoke_enabled_state = [bool(persisted_settings.get('ConsoleKaraokeEnabled', 1))]
+        alert_no_replaygain_state = [bool(persisted_settings.get('AlertNoReplayGain', 1))]
+        alert_missing_artist_state = [bool(persisted_settings.get('AlertMissingArtist', 1))]
+        alert_missing_title_state = [bool(persisted_settings.get('AlertMissingTitle', 1))]
+        alert_missing_karaoke_state = [bool(persisted_settings.get('AlertMissingKaraoke', 0))]
+        alert_missing_lyrics_state = [bool(persisted_settings.get('AlertMissingLyrics', 0))]
+        alert_missing_artwork_state = [bool(persisted_settings.get('AlertMissingArtwork', 0))]
+        alert_unknown_year_state = [bool(persisted_settings.get('AlertUnknownYear', 0))]
+        alert_unknown_genre_state = [bool(persisted_settings.get('AlertUnknownGenre', 0))]
+        alert_embedded_lyrics_mismatch_state = [bool(persisted_settings.get('AlertEmbeddedLyricsMismatch', 1))]
         progress_style_state = [persisted_settings['ProgressStyle']]
         progress_bar_enabled_state = [bool(persisted_settings.get('ProgressBarEnabled', 1))]
         progress_beat_reactive_state = [bool(persisted_settings.get('ProgressBeatReactive', 1))]
@@ -57288,6 +61045,11 @@ def main(argv: list[str] | None = None) -> int:
 
         if playlist_argument is not None:
             playlist_path = Path(playlist_argument).absolute().resolve()
+            if not playlist_path.is_file():
+                warning = f"Playlist file not found; nothing to play: {playlist_path}"
+                print(f"⚠ {warning}", file=sys.stderr)
+                append_pafplayer_trace("playlist.missing", playlist=playlist_path)
+                return 0
             # Do not make the first audible track wait on SQLite. V303 may need
             # a one-time multi-decade history reunification, so even this normally
             # tiny visit-ledger read runs on a daemon. The shared repair lock keeps
@@ -57472,41 +61234,17 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
 
             def browse_active_playlist(direction: int, current: Path) -> Path | None:
-                """Open the fast previous/current/future browser from in-memory state only."""
+                """PgUp/PgDn shows the literal active N-slot queue; visit history never inflates membership."""
                 with playlist_shuffle_lock:
-                    previous = tuple(
-                        playlist_navigation_history[:max(0, playlist_navigation_cursor)]
-                    )
-                    active_order = tuple(
+                    snapshot = list(
                         playlist_shuffle_order
                         if shuffle_state and shuffle_state[0] and playlist_shuffle_order
                         else (playlist_entries or [])
                     )
-
                 current_path = Path(current)
-                current_removed = removed_runtime_key(current_path) in removed_playlist_track_keys
-                snapshot, current_index = build_playlist_browser_snapshot(
-                    previous,
-                    active_order,
-                    current_path,
-                    include_current_if_missing=not current_removed,
-                )
-                # V238: the PgUp/PgDn browser must tell the truth about the
-                # play-next queue. Put explicit INS/Enter requests immediately
-                # after the current row and remove their later duplicates.
-                with playlist_shuffle_lock:
-                    queued_next = list(playlist_manual_next_queue)
-                if queued_next:
-                    head = snapshot[:current_index + 1]
-                    queued_keys = {lexical_path_key(Path(item)) for item in queued_next}
-                    tail = [item for item in snapshot[current_index + 1:] if lexical_path_key(Path(item)) not in queued_keys]
-                    deduped_queue: list[Path] = []
-                    seen_queue: set[str] = set()
-                    for item in queued_next:
-                        key = lexical_path_key(Path(item))
-                        if key not in seen_queue:
-                            deduped_queue.append(Path(item)); seen_queue.add(key)
-                    snapshot = head + deduped_queue + tail
+                current_index = _playlist_slot_index(snapshot, current_path)
+                if removed_runtime_key(current_path) in removed_playlist_track_keys:
+                    current_index = -1
                 def queue_from_browser(candidates: list[Path]) -> int:
                     queued = 0
                     with playlist_shuffle_lock:
@@ -57517,58 +61255,36 @@ def main(argv: list[str] | None = None) -> int:
                             playlist_manual_next_queue.append(candidate)
                             queued += 1
                     return queued
-
                 return interactive_playlist_browser(
-                    snapshot,
-                    current_index,
-                    initial_direction=direction,
-                    queue_callback=queue_from_browser,
+                    snapshot, current_index, initial_direction=direction, queue_callback=queue_from_browser,
                 )
 
             def web_playlist_snapshot(*, offset: int | None = None, limit: int = 120) -> dict[str, object]:
-                """Return a bounded, live playlist/queue window for the EXP web control."""
+                """Return a bounded window into the literal active N-slot queue."""
                 limit = min(300, max(20, int(limit)))
                 with playlist_shuffle_lock:
-                    active_order = list(
+                    snapshot = list(
                         playlist_shuffle_order
                         if shuffle_state and shuffle_state[0] and playlist_shuffle_order
                         else (playlist_entries or [])
                     )
                     queued_next = [Path(item) for item in playlist_manual_next_queue]
-                    previous = tuple(playlist_navigation_history[:max(0, playlist_navigation_cursor)])
                     live_current = Path(current_audio) if current_audio is not None else None
-                if live_current is None:
-                    return {"active": True, "items": [], "queue": [str(p) for p in queued_next], "total": len(active_order), "offset": 0, "limit": limit}
-                current_removed = removed_runtime_key(live_current) in removed_playlist_track_keys
-                snapshot, current_index = build_playlist_browser_snapshot(
-                    previous, active_order, live_current,
-                    include_current_if_missing=not current_removed,
-                )
-                queued_keys = {lexical_path_key(item) for item in queued_next}
-                if queued_next:
-                    head = snapshot[:current_index + 1]
-                    tail = [item for item in snapshot[current_index + 1:] if lexical_path_key(item) not in queued_keys]
-                    qseen: set[str] = set(); qrows: list[Path] = []
-                    for item in queued_next:
-                        key = lexical_path_key(item)
-                        if key not in qseen:
-                            qrows.append(item); qseen.add(key)
-                    snapshot = head + qrows + tail
+                current_index = _playlist_slot_index(snapshot, live_current) if live_current is not None else -1
                 if offset is None:
                     offset = max(0, current_index - max(10, limit // 4)) if current_index >= 0 else 0
                 offset = min(max(0, int(offset)), max(0, len(snapshot) - 1)) if snapshot else 0
                 rows = snapshot[offset:offset + limit]
-                current_key = lexical_path_key(live_current)
+                queued_keys = {lexical_path_key(item) for item in queued_next}
                 items = []
                 for absolute_index, item in enumerate(rows, offset):
-                    key = lexical_path_key(Path(item))
                     items.append({
                         "index": absolute_index + 1,
                         "path": str(item),
                         "filename": Path(item).name,
                         "label": Path(item).name,
-                        "current": key == current_key,
-                        "queued": key in queued_keys,
+                        "current": absolute_index == current_index,
+                        "queued": lexical_path_key(Path(item)) in queued_keys,
                     })
                 return {
                     "active": True,
@@ -57615,11 +61331,18 @@ def main(argv: list[str] | None = None) -> int:
 
             # V295 grows directly from v266: speakers start first. Cache loading, playlist
             # parsing, history scoring and shuffle-cache writes all happen behind playback.
+            # V309 queue invariant: parsing the playlist file is cheap and happens once up front.
+            # Historical scoring/shuffling remains background work, but the session owns all N slots now.
+            playlist_entries = merge_runtime_added(filter_runtime_removed(load_playlist(playlist_path, show_progress=False)))
+            if not playlist_entries:
+                raise ValueError(f"Playlist contains no usable local audio files: {playlist_path}")
+            playlist_track_count_state[0] = len(playlist_entries)
             saved_resume = load_playlist_resume(playlist_path)
             resumed_entry = None
             if saved_resume is not None:
                 saved_track, saved_position = saved_resume
-                resumed_entry = find_track_in_playlist_fast(playlist_path, saved_track)
+                resume_index = _playlist_slot_index(list(playlist_entries), Path(saved_track))
+                resumed_entry = playlist_entries[resume_index] if resume_index >= 0 else None
                 if resumed_entry is not None:
                     initial_resume_position = sanitize_playlist_resume_position(resumed_entry, saved_position)
 
@@ -57634,16 +61357,15 @@ def main(argv: list[str] | None = None) -> int:
                 )
             else:
                 initial_resume_position = 0.0
-                current_audio = quick_random_playlist_track(playlist_path)
+                current_audio = random.choice(playlist_entries)
 
-            # Give every consumer one usable provisional track immediately. The worker
-            # atomically replaces this with the complete source list/history queue later.
-            playlist_entries = [current_audio]
-            playlist_track_count_state[0] = None
-            playlist_shuffle_order = None
-            playlist_background_status_state[0] = "loading/history shuffling in background"
+            # Working queue is already N slots long. Shuffle mode is sequential playback
+            # over this queue while the history worker computes a better N-slot permutation.
+            playlist_shuffle_order = move_playlist_track_to_front_preserving_order(list(playlist_entries), current_audio)
+            playlist_background_status_state[0] = "history shuffling in background"
             playlist_ready_event = threading.Event()
             playlist_entries_ready_event = threading.Event()
+            playlist_entries_ready_event.set()
             initial_playlist_track = Path(os.path.abspath(os.path.normpath(str(current_audio))))
             playlist_source_signature_state: list[tuple[int, int] | None] = [playlist_source_signature(playlist_path)]
             playlist_prepare_thread: threading.Thread | None = None
@@ -57663,35 +61385,40 @@ def main(argv: list[str] | None = None) -> int:
                     playlist_background_status_state[0] = "checking saved history shuffle"
                     cached = load_playlist_shuffle_cache(playlist_path, shuffle_expiration_in_hours)
                     if cached is not None:
-                        entries, order = cached
-                        entries = merge_runtime_added(filter_runtime_removed(list(entries)))
-                        order = merge_runtime_added(filter_runtime_removed(list(order)))
-                        live = Path(current_audio)
-                        order = move_playlist_track_to_front_preserving_order(order, live)
-                        with playlist_shuffle_lock:
-                            playlist_entries = entries
-                            playlist_shuffle_order = order
-                            playlist_track_count_state[0] = len(entries)
-                            playlist_shuffle_created_at = playlist_shuffle_cache_created_at(playlist_path) or time.time()
-                            if resume_first_forward_pending and resume_anchor_path is not None and same_audio_file_identity(live, resume_anchor_path):
-                                resume_first_successor = playlist_resume_successor(order, live)
-                            playlist_source_signature_state[0] = playlist_source_signature(playlist_path)
-                        playlist_entries_ready_event.set(); playlist_ready_event.set()
-                        append_pafplayer_trace(
-                            "playlist.shuffle.ready-cache", playlist=playlist_path, entries=len(entries),
-                            current=current_audio, worker=threading.current_thread().name,
-                        )
-                        playlist_background_status_state[0] = None
-                        return
+                        cached_entries, cached_order = cached
+                        cached_entries = merge_runtime_added(filter_runtime_removed(list(cached_entries)))
+                        cached_order = merge_runtime_added(filter_runtime_removed(list(cached_order)))
+                        if len(cached_entries) != len(cached_order):
+                            # V309's N-slot invariant rejects old/damaged caches by rebuilding;
+                            # a cache mismatch must never abort the session background worker.
+                            delete_playlist_shuffle_cache(playlist_path)
+                            append_pafplayer_trace(
+                                "playlist.shuffle.cache-slot-mismatch", playlist=playlist_path,
+                                entries=len(cached_entries), order=len(cached_order),
+                            )
+                        else:
+                            live = Path(current_audio)
+                            cached_order = move_playlist_track_to_front_preserving_order(cached_order, live)
+                            with playlist_shuffle_lock:
+                                playlist_entries = cached_entries
+                                playlist_shuffle_order = cached_order
+                                playlist_track_count_state[0] = len(cached_entries)
+                                playlist_shuffle_created_at = playlist_shuffle_cache_created_at(playlist_path) or time.time()
+                                if resume_first_forward_pending and resume_anchor_path is not None and same_audio_file_identity(live, resume_anchor_path):
+                                    resume_first_successor = playlist_resume_successor(cached_order, live)
+                                playlist_source_signature_state[0] = playlist_source_signature(playlist_path)
+                            playlist_entries_ready_event.set(); playlist_ready_event.set()
+                            append_pafplayer_trace(
+                                "playlist.shuffle.ready-cache", playlist=playlist_path, entries=len(cached_entries),
+                                current=current_audio, worker=threading.current_thread().name,
+                            )
+                            playlist_background_status_state[0] = None
+                            return
 
-                    def reading_progress(percent: int) -> None:
-                        playlist_background_status_state[0] = f"reading playlist {max(0, min(100, int(percent)))}%"
-                    entries = merge_runtime_added(filter_runtime_removed(load_playlist(playlist_path, show_progress=False, progress_callback=reading_progress)))
+                    with playlist_shuffle_lock:
+                        entries = list(playlist_entries or [])
                     if not entries:
                         raise ValueError(f"Playlist contains no usable local audio files: {playlist_path}")
-                    with playlist_shuffle_lock:
-                        playlist_entries = list(entries); playlist_track_count_state[0] = len(entries)
-                    playlist_entries_ready_event.set()
 
                     def shuffle_progress(label: str) -> None:
                         playlist_background_status_state[0] = label
@@ -57850,40 +61577,7 @@ def main(argv: list[str] | None = None) -> int:
             shuffle_state = [False]
         while True:
             playback_position_state[0] = initial_resume_position
-            # Final playback-boundary invariant.  Queue/history code should have
-            # chosen a different file already, but stale cache aliases can be
-            # surprisingly subtle.  Immediately before launching FFplay, refuse
-            # to replay the same physical file after a forward transition when
-            # another playlist entry exists.
-            if (
-                playlist_path is not None
-                and last_transition_was_forward
-                and last_launched_audio is not None
-                and same_audio_file_identity_strict(current_audio, last_launched_audio)
-            ):
-                # Absolute V89 launch-boundary invariant: if a resume/shuffle race
-                # somehow hands us the same track again, advance *again* through
-                # the best currently available order and refuse duplicate aliases.
-                active_guard_order = list(
-                    playlist_shuffle_order
-                    if shuffle_state and shuffle_state[0] and playlist_shuffle_order
-                    else (playlist_entries or [])
-                )
-                corrected = force_distinct_forward_playlist_candidate(
-                    active_guard_order,
-                    last_launched_audio,
-                    current_audio,
-                )
-                if same_audio_file_identity_strict(corrected, last_launched_audio):
-                    # A still-building shuffle order may momentarily be too small.
-                    # Retry against the full loaded playlist as an independent
-                    # source before allowing the same physical file to launch.
-                    corrected = force_distinct_forward_playlist_candidate(
-                        list(playlist_entries or []),
-                        last_launched_audio,
-                        current_audio,
-                    )
-                current_audio = corrected
+            # V309: no distinct-file launch guard. Duplicate playlist slots are intentional slots.
             if external_album_art_window is not None:
                 external_album_art_window.update_track(current_audio)
             if not all_audio_tags_state[0]:
@@ -57974,6 +61668,8 @@ def main(argv: list[str] | None = None) -> int:
                 autoplay=autoplay_state[0],
                 resume_position=initial_resume_position,
             )
+            if external_album_art_window is not None:
+                external_album_art_window.set_playback_running(not bool(playback_paused_state[0]))
             result = play_audio_file(
                 current_audio,
                 sixel_visualizer=sixel_enabled,
@@ -57995,7 +61691,19 @@ def main(argv: list[str] | None = None) -> int:
                 karaoke_style_state=karaoke_style_state,
                 karaoke_treatment_state=karaoke_treatment_state,
                 karaoke_emojimax_state=karaoke_emojimax_state,
+                decensor_console_karaoke_state=decensor_console_karaoke_state,
+                decensor_artwork_lyrics_state=decensor_artwork_lyrics_state,
+                decensor_floating_lyrics_state=decensor_floating_lyrics_state,
                 console_karaoke_enabled_state=console_karaoke_enabled_state,
+                alert_no_replaygain_state=alert_no_replaygain_state,
+                alert_missing_artist_state=alert_missing_artist_state,
+                alert_missing_title_state=alert_missing_title_state,
+                alert_missing_karaoke_state=alert_missing_karaoke_state,
+                alert_missing_lyrics_state=alert_missing_lyrics_state,
+                alert_missing_artwork_state=alert_missing_artwork_state,
+                alert_unknown_year_state=alert_unknown_year_state,
+                alert_unknown_genre_state=alert_unknown_genre_state,
+                alert_embedded_lyrics_mismatch_state=alert_embedded_lyrics_mismatch_state,
                 progress_style_state=progress_style_state,
                 progress_bar_enabled_state=progress_bar_enabled_state,
                 progress_beat_reactive_state=progress_beat_reactive_state,
@@ -58073,6 +61781,8 @@ def main(argv: list[str] | None = None) -> int:
                 attribute_management_enabled=bool(CLAIRE_ECOSYSTEM and not suppress_attribute_management),
                 theory_modes=frozenset(theory_modes),
             )
+            if external_album_art_window is not None:
+                external_album_art_window.set_playback_running(False)
             append_pafplayer_trace(
                 "session.track-result",
                 track=current_audio,
@@ -58091,7 +61801,19 @@ def main(argv: list[str] | None = None) -> int:
                 'KaraokeStyle': karaoke_style_state[0],
                 'KaraokeTreatment': karaoke_treatment_state[0],
                 'KaraokeEmojimax': int(karaoke_emojimax_state[0]),
+                'DecensorConsoleKaraoke': int(decensor_console_karaoke_state[0]),
+                'DecensorArtworkLyrics': int(decensor_artwork_lyrics_state[0]),
+                'DecensorFloatingLyrics': int(decensor_floating_lyrics_state[0]),
                 'ConsoleKaraokeEnabled': int(console_karaoke_enabled_state[0]),
+                'AlertNoReplayGain': int(alert_no_replaygain_state[0]),
+                'AlertMissingArtist': int(alert_missing_artist_state[0]),
+                'AlertMissingTitle': int(alert_missing_title_state[0]),
+                'AlertMissingKaraoke': int(alert_missing_karaoke_state[0]),
+                'AlertMissingLyrics': int(alert_missing_lyrics_state[0]),
+                'AlertMissingArtwork': int(alert_missing_artwork_state[0]),
+                'AlertUnknownYear': int(alert_unknown_year_state[0]),
+                'AlertUnknownGenre': int(alert_unknown_genre_state[0]),
+                'AlertEmbeddedLyricsMismatch': int(alert_embedded_lyrics_mismatch_state[0]),
                 'ProgressStyle': progress_style_state[0],
                 'ProgressBarEnabled': int(progress_bar_enabled_state[0]),
                 'ProgressBeatReactive': int(progress_beat_reactive_state[0]),
@@ -58174,7 +61896,7 @@ def main(argv: list[str] | None = None) -> int:
                     raise RuntimeError(f"Could not read playlist entries: {playlist_background_error[0]}") from playlist_background_error[0]
                 if not playlist_entries:
                     playlist_entries = [current_audio]
-                if shuffle_state and shuffle_state[0] and playlist_ready_event is not None and playlist_ready_event.is_set():
+                if shuffle_state and shuffle_state[0] and result in {NEXT_FILE, "completed"}:
                     phase_started = time.monotonic()
                     with playlist_shuffle_lock:
                         if (
@@ -58192,7 +61914,7 @@ def main(argv: list[str] | None = None) -> int:
                                 playlist_shuffle_order, current_audio
                             )
                         if not playlist_shuffle_order:
-                            playlist_shuffle_order = list(playlist_entries)
+                            playlist_shuffle_order = move_playlist_track_to_front_preserving_order(list(playlist_entries or []), current_audio)
                         if removed_runtime_key(current_audio) not in removed_playlist_track_keys:
                             playlist_shuffle_order = rotate_playlist_queue_after_play(
                                 playlist_shuffle_order, current_audio
@@ -58239,59 +61961,28 @@ def main(argv: list[str] | None = None) -> int:
                 previous_directory = current_audio.parent.resolve()
 
                 def queue_neighbor(direction: int) -> Path:
-                    """Return an adjacent/provisional track without mass filesystem resolution."""
-                    nonlocal playlist_shuffle_order
-                    full_shuffle_ready = bool(playlist_ready_event is not None and playlist_ready_event.is_set())
-                    if shuffle_state and shuffle_state[0] and full_shuffle_ready and playlist_shuffle_order:
-                        order = playlist_shuffle_order
-                    else:
-                        order = playlist_entries or []
+                    """Return the next literal queue slot; shuffle never performs random selection at transition time."""
+                    with playlist_shuffle_lock:
+                        order = list(
+                            playlist_shuffle_order
+                            if shuffle_state and shuffle_state[0] and playlist_shuffle_order
+                            else (playlist_entries or [])
+                        )
                     if not order:
-                        order = [current_audio]
-
-                    # If historical shuffle is still being prepared, do not stall
-                    # the speakers. Pick a provisional random entry; when the
-                    # background queue publishes, it re-anchors to current_audio.
-                    if shuffle_state and shuffle_state[0] and not full_shuffle_ready:
-                        if playlist_background_status_state is not None:
-                            phase = playlist_background_status_state[0] or "historical shuffling continues in background"
-                            playlist_background_status_state[0] = phase
-                            write_console(
-                                f"\r\033[2K⚡ Playlist transition: {phase}; using provisional next track\n"
-                            )
-                        provisional = None
-                        for _ in range(min(128, max(1, len(order)))):
-                            candidate = random.choice(order)
-                            if candidate.is_file() and not same_audio_file_identity(candidate, current_audio):
-                                provisional = candidate; break
-                        # During the earliest phase the published list may contain only
-                        # current_audio. Sample the file-backed playlist directly so a
-                        # short song still hands off immediately rather than waiting.
-                        if provisional is None and playlist_path is not None:
-                            for _ in range(24):
-                                with contextlib.suppress(Exception):
-                                    candidate = quick_random_playlist_track(playlist_path)
-                                    if candidate.is_file() and not same_audio_file_identity(candidate, current_audio):
-                                        provisional = candidate; break
-                        if provisional is not None:
-                            return shuffle_candidate_avoiding_recent(list(order) + [provisional], current_audio, provisional)
-
-                    candidate = playlist_queue_neighbor_distinct(
-                        list(order), current_audio, direction
-                    )
+                        if current_audio.is_file():
+                            return current_audio
+                        raise ValueError(f"Playlist contains no existing playable files: {playlist_path}")
+                    if shuffle_state and shuffle_state[0] and direction > 0:
+                        # Forward rotation has already moved the departed slot to the tail.
+                        # Therefore index 0 is literally the next playlist slot, including a
+                        # deliberate duplicate physical file. Skip only missing files.
+                        for candidate in order:
+                            candidate = Path(candidate)
+                            if candidate.is_file():
+                                return candidate
+                    candidate = playlist_queue_neighbor_distinct(order, current_audio, direction)
                     if candidate is not None:
-                        if shuffle_state and shuffle_state[0] and direction > 0:
-                            candidate = shuffle_candidate_avoiding_recent(
-                                list(order), current_audio, candidate
-                            )
                         return candidate
-
-                    # Never terminate the whole player merely because every known
-                    # queue entry is the current physical file.  A one-track list,
-                    # alias-heavy list, or momentary rebuild state may legitimately
-                    # have no distinct successor.  Replaying current is preferable
-                    # to falling back to the command prompt; the next transition can
-                    # try again after the background queue changes.
                     if current_audio.is_file():
                         return current_audio
                     raise ValueError(f"Playlist contains no existing playable files: {playlist_path}")
@@ -58362,46 +62053,8 @@ def main(argv: list[str] | None = None) -> int:
                         result,
                         queue_neighbor,
                     )
-                if (
-                    result in {NEXT_FILE, "completed"}
-                    and not manual_queue_transition
-                    and shuffle_state and shuffle_state[0]
-                ):
-                    recent_guard_order = list(
-                        playlist_shuffle_order
-                        if playlist_shuffle_order
-                        else (playlist_entries or [])
-                    )
-                    current_audio = shuffle_candidate_avoiding_recent(
-                        recent_guard_order,
-                        prior_audio,
-                        current_audio,
-                    )
-                    if playlist_navigation_history:
-                        playlist_navigation_history[-1] = current_audio
 
-                # Secondary absolute invariant.  Resume now has its own captured
-                # one-shot successor above, but retain this guard for every other
-                # forward-navigation path and malformed/duplicate playlists.
-                if result in {NEXT_FILE, "completed"} and same_audio_file_identity_strict(current_audio, prior_audio):
-                    active_guard_order = list(
-                        playlist_shuffle_order
-                        if shuffle_state and shuffle_state[0] and playlist_shuffle_order
-                        else (playlist_entries or [])
-                    )
-                    current_audio = force_distinct_forward_playlist_candidate(
-                        active_guard_order,
-                        prior_audio,
-                        current_audio,
-                    )
-                    if same_audio_file_identity_strict(current_audio, prior_audio):
-                        current_audio = force_distinct_forward_playlist_candidate(
-                            list(playlist_entries or []),
-                            prior_audio,
-                            current_audio,
-                        )
-                    if playlist_navigation_history:
-                        playlist_navigation_history[-1] = current_audio
+                # V309: do not skip a same-file next slot; physical duplicates are valid playlist entries.
 
                 if current_audio.parent.resolve() != previous_directory:
                     pending_folder_line = current_audio.parent
@@ -59197,7 +62850,7 @@ def display_lastfm_play_history() -> None:
         semantic["one"] = "❶"
         try:
             rendered = strip_ansi(stylize_karaoke_with_emojimax("This one is not the end", 1, True, force_emoji_when_enabled=True))
-            self.assertIn("❶  is", rendered)
+            self.assertIn("❶ is", rendered)
             ending = strip_ansi(stylize_karaoke_with_emojimax("the one", 1, True, force_emoji_when_enabled=True))
             self.assertTrue(ending.endswith("❶"))
             self.assertFalse(ending.endswith("❶ "))

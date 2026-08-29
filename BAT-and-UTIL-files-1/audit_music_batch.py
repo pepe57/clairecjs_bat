@@ -46,8 +46,8 @@ from typing import Any, Callable, NoReturn
 # Published releases are deliberately separate from the timestamped safety
 # backups that the auditor makes before replacements. Update both values only
 # when publishing a new named release.
-AUDIT_MUSIC_BATCH_VERSION = "v146"
-AUDIT_MUSIC_BATCH_RELEASE_NAME = "direct-chafa-terminal-waveforms"
+AUDIT_MUSIC_BATCH_VERSION = "v148"
+AUDIT_MUSIC_BATCH_RELEASE_NAME = "stacked-full-width-waveform-comparisons"
 AUDIT_MUSIC_BATCH_RELEASE_DATE = "2026-08-14"
 
 # Set this to a full executable path only when automatic discovery cannot find
@@ -1673,11 +1673,17 @@ def canonical_song_title_text(text: str) -> str:
     normalized = str(text).translate(str.maketrans({
         "‘": "'", "’": "'", "“": '"', "”": '"',
     }))
+    # ``_ (modifier)`` is Claire's filename-safe spelling for ``? (modifier)``.
+    # Keep that underscore: Windows cannot store the literal question mark, and
+    # treating it as an ordinary separator silently changes the song title.
+    protected_question_boundary = "\ue000"
     normalized = re.sub(
-        r"_+",
-        " ",
-        strip_trailing_tracking_identifier(str(text)),
+        r"_+(?=\s*[\[(])",
+        protected_question_boundary,
+        strip_trailing_tracking_identifier(normalized),
     )
+    normalized = re.sub(r"_+", " ", normalized)
+    normalized = normalized.replace(protected_question_boundary, "_")
     normalized = re.sub(r"\bfeat\.(?=\s|\))", "feat", normalized, flags=re.I)
     normalized = re.sub(r"\s+", " ", normalized).strip()
     normalized = re.sub(r"\(\s+", "(", normalized)
@@ -1687,15 +1693,22 @@ def canonical_song_title_text(text: str) -> str:
         value.casefold(): value
         for value in CANONICAL_FILENAME_MARKERS.values()
     }
-    pieces = re.split(r"(\[[^\]]+\])", normalized)
+    # Bracketed and parenthesized values are filename modifiers, not ordinary
+    # title words. Their author-supplied spelling (for example ``(acoustic)``)
+    # must therefore survive title normalization unchanged.
+    pieces = re.split(r"(\[[^\]]+\]|\([^)]*\))", normalized)
     word_pattern = re.compile(
         r"[^\W\d_]+(?:['’][^\W\d_]+)*",
         flags=re.UNICODE,
     )
     for index, piece in enumerate(pieces):
+        is_bracketed = piece.startswith("[") and piece.endswith("]")
+        is_parenthesized = piece.startswith("(") and piece.endswith(")")
         canonical_marker = marker_values.get(piece.casefold())
-        if canonical_marker is not None:
+        if is_bracketed and canonical_marker is not None:
             pieces[index] = canonical_marker
+            continue
+        if is_bracketed or is_parenthesized:
             continue
         pieces[index] = word_pattern.sub(
             lambda match: canonical_title_word(match.group(0)),
@@ -6925,6 +6938,59 @@ def render_waveform_preview(path: Path, *, use_color: bool) -> str:
     )
 
 
+def render_waveform_before_after_panels(
+    before_path: Path,
+    after_path: Path,
+    *,
+    use_color: bool,
+) -> str:
+    """Show genuine before/after waveforms vertically at full review width.
+
+    A side-by-side contact sheet gave each panel only half of the review width.
+    Render the two source waveforms independently through direct Chafa instead:
+    the before panel is above the after panel and each receives the normal 80%
+    review viewport. Chafa owns cursor placement and naturally scrolls the
+    earlier panel upward when the pair exceeds one terminal screen.
+    """
+    print(
+        rgb_text(
+            "            Before ReplayGain bake:",
+            220,
+            95,
+            180,
+            use_color,
+            dim=True,
+        )
+    )
+    before_mode = emit_prepared_artwork_preview(
+        prepare_waveform_preview(
+            before_path,
+            use_color=use_color,
+            width_fraction=WAVEFORM_REVIEW_WIDTH_FRACTION,
+            height_scale=WAVEFORM_REVIEW_HEIGHT_SCALE,
+        )
+    )
+    print(
+        rgb_text(
+            "            After ReplayGain bake:",
+            90,
+            220,
+            190,
+            use_color,
+            dim=True,
+        )
+    )
+    after_mode = emit_prepared_artwork_preview(
+        prepare_waveform_preview(
+            after_path,
+            use_color=use_color,
+            width_fraction=WAVEFORM_REVIEW_WIDTH_FRACTION,
+            height_scale=WAVEFORM_REVIEW_HEIGHT_SCALE,
+        )
+    )
+    return before_mode if before_mode == after_mode else f"{before_mode}; {after_mode}"
+
+
 def render_waveform_comparison_preview(path: Path, *, use_color: bool) -> str:
     """Render pre/post ReplayGain comparison waves at the configured wide width."""
     return emit_prepared_artwork_preview(
@@ -11134,50 +11200,23 @@ def review_waveforms(
                         )
                     )
 
-                prepared_comparison_sheet: PreparedArtworkPreview | None = None
-                prepared_comparison_sheet_key: tuple[int, int, int, int] | None = None
-
                 def queued_comparison_after_renderer(
                     path: Path,
                     *,
                     use_color: bool,
                 ) -> str:
-                    nonlocal prepared_comparison_sheet
-                    nonlocal prepared_comparison_sheet_key
                     if comparison_waveform is None:
                         return queued_preview_renderer(path, use_color=use_color)
-                    before_stat = comparison_waveform.stat()
-                    after_stat = path.stat()
-                    key = (
-                        before_stat.st_size,
-                        before_stat.st_mtime_ns,
-                        after_stat.st_size,
-                        after_stat.st_mtime_ns,
+                    return render_waveform_before_after_panels(
+                        comparison_waveform,
+                        path,
+                        use_color=use_color,
                     )
-                    if prepared_comparison_sheet is None or key != prepared_comparison_sheet_key:
-                        sheet_path = collision_safe_path(
-                            staged_waveform.with_name(
-                                f"{staged_waveform.stem}.before-after-contact-sheet.jpg"
-                            )
-                        )
-                        create_waveform_comparison_contact_sheet(
-                            comparison_waveform,
-                            path,
-                            sheet_path,
-                        )
-                        prepared_comparison_sheet = prepare_waveform_preview(
-                            sheet_path,
-                            use_color=use_color,
-                            width_fraction=WAVEFORM_COMPARISON_WIDTH_FRACTION,
-                            height_scale=WAVEFORM_COMPARISON_HEIGHT_SCALE,
-                        )
-                        prepared_comparison_sheet_key = key
-                    return emit_prepared_artwork_preview(prepared_comparison_sheet)
 
                 if comparison_waveform is not None:
                     reset_console_pager_after_user_input()
-                    # Discard the obsolete separately prepared "before" frame.
-                    # Built-in rendering now emits one physical contact sheet;
+                    # Discard the obsolete background preview. Built-in rendering
+                    # now invokes Chafa directly for vertically stacked panels;
                     # custom renderers retain their historical two-call behavior.
                     prepared_comparison_previews.pop(audio_path, None)
                     if preview_renderer is not None:
@@ -14923,6 +14962,113 @@ def set_album_tag(path: Path, album: str) -> tuple[str, Path]:
     return value, backup
 
 
+ALBUM_TAG_SKIP_REMAINING_FOLDER_ACTION = "skip_missing_album_for_folder"
+_SHIFT_ENTER_INPUT_SEQUENCES = {
+    "\x1b[13;2u",  # CSI-u keyboard protocol
+    "\x1b[27;2;13~",  # modifyOtherKeys protocol
+}
+
+
+def read_windows_line_with_shift_enter(prompt: str) -> tuple[str, bool] | None:
+    """Read an editable console line and retain the Shift state of ENTER.
+
+    ``input()`` receives Shift+ENTER as an indistinguishable newline in many
+    Windows terminals.  Reading console key events directly keeps the modifier
+    state intact while retaining normal text and backspace editing.  A redirected
+    stdin simply returns ``None`` so the ordinary ``input`` fallback remains
+    available to scripts and tests.
+    """
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        import msvcrt
+
+        class KeyEventRecord(ctypes.Structure):
+            _fields_ = (
+                ("bKeyDown", ctypes.c_int),
+                ("wRepeatCount", ctypes.c_ushort),
+                ("wVirtualKeyCode", ctypes.c_ushort),
+                ("wVirtualScanCode", ctypes.c_ushort),
+                ("UnicodeChar", ctypes.c_wchar),
+                ("dwControlKeyState", ctypes.c_ulong),
+            )
+
+        class InputRecordUnion(ctypes.Union):
+            _fields_ = (("KeyEvent", KeyEventRecord),)
+
+        class InputRecord(ctypes.Structure):
+            _fields_ = (("EventType", ctypes.c_ushort), ("Event", InputRecordUnion))
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        get_mode = kernel32.GetConsoleMode
+        set_mode = kernel32.SetConsoleMode
+        read_input = kernel32.ReadConsoleInputW
+        handle = msvcrt.get_osfhandle(sys.stdin.fileno())
+        original_mode = ctypes.c_ulong()
+        if not get_mode(handle, ctypes.byref(original_mode)):
+            return None
+        # Keep Ctrl+C processing, but receive individual key events and echo
+        # them ourselves so the modifier state on ENTER is observable.
+        line_input = 0x0002
+        echo_input = 0x0004
+        if not set_mode(handle, original_mode.value & ~line_input & ~echo_input):
+            return None
+        print(prompt, end="", flush=True)
+        entered: list[str] = []
+        records_read = ctypes.c_ulong()
+        key_event = 0x0001
+        vk_return = 0x000D
+        vk_back = 0x0008
+        shift_pressed = 0x0010
+        control_or_alt = 0x0003 | 0x000C
+        try:
+            while True:
+                record = InputRecord()
+                if not read_input(handle, ctypes.byref(record), 1, ctypes.byref(records_read)):
+                    return None
+                if records_read.value != 1 or record.EventType != key_event:
+                    continue
+                key = record.Event.KeyEvent
+                if not key.bKeyDown:
+                    continue
+                if key.wVirtualKeyCode == vk_return:
+                    print()
+                    return "".join(entered), bool(key.dwControlKeyState & shift_pressed)
+                if key.wVirtualKeyCode == vk_back:
+                    if entered:
+                        entered.pop()
+                        print("\b \b", end="", flush=True)
+                    continue
+                if key.dwControlKeyState & control_or_alt:
+                    continue
+                character = key.UnicodeChar
+                if character and character >= " ":
+                    repeated = character * max(1, int(key.wRepeatCount))
+                    entered.append(repeated)
+                    print(repeated, end="", flush=True)
+        finally:
+            set_mode(handle, original_mode.value)
+    except Exception:
+        return None
+
+
+def read_album_tag_value(
+    prompt: str,
+    *,
+    input_reader=None,
+) -> tuple[str, bool]:
+    """Return entered album text plus whether Shift+ENTER selected folder skip."""
+    if input_reader is not None:
+        entered = str(input_reader(prompt))
+        return entered, entered in _SHIFT_ENTER_INPUT_SEQUENCES
+    console_value = read_windows_line_with_shift_enter(prompt)
+    if console_value is not None:
+        return console_value
+    entered = input(prompt)
+    return entered, entered in _SHIFT_ENTER_INPUT_SEQUENCES
+
+
 def prompt_for_album_tag(
     root: Path,
     finding: dict[str, Any],
@@ -14941,17 +15087,32 @@ def prompt_for_album_tag(
     prompt = (
         "            "
         + urgent_prompt_text(
-            "Album value (press ENTER to leave unchanged):",
+            "Album value (ENTER=leave unchanged; Shift+ENTER=leave unchanged "
+            "for rest of this folder):",
             use_color,
         )
         + " "
     )
-    text_reader = input_reader or input
     try:
-        value = text_reader(prompt).strip()
+        entered, skip_remaining_folder = read_album_tag_value(
+            prompt,
+            input_reader=input_reader,
+        )
+        value = "" if skip_remaining_folder else entered.strip()
     except EOFError:
         value = ""
+        skip_remaining_folder = False
     reset_console_pager_after_user_input()
+    if skip_remaining_folder and not value:
+        print(
+            colorize(
+                "            ↪️ Unchanged — remaining missing album tags in "
+                "this folder will be skipped.",
+                "dim",
+                use_color,
+            )
+        )
+        return [ALBUM_TAG_SKIP_REMAINING_FOLDER_ACTION]
     if not value:
         print(
             colorize(
@@ -15712,10 +15873,38 @@ def interactive_apply(
     remembered_category_choices: dict[str, str] = {}
     remembered_folder_approvals: set[tuple[str, str]] = set()
     remembered_folder_skips: set[tuple[str, str]] = set()
+    remembered_missing_album_folder_skips: set[Path] = set()
     remembered_punk_genre_selection: str | None = None
     remembered_punk_genre_folder_selections: dict[str, str] = {}
 
     for finding in coded:
+        if finding["category"] == "missing_album":
+            album_folder = safe_finding_path(root, finding).parent.resolve()
+            if album_folder in remembered_missing_album_folder_skips:
+                skipped.append(finding["code"])
+                decisions.append(
+                    {
+                        "code": finding["code"],
+                        "applied": False,
+                        "skipped": True,
+                        "error": None,
+                        "actions": ["unchanged:missing_album_folder_skip"],
+                        "default": True,
+                        "finding": finding,
+                    }
+                )
+                print(
+                    rgb_text(
+                        "            ↪️ Album unchanged — skipped for this "
+                        "folder by an earlier Shift+ENTER.",
+                        175,
+                        155,
+                        145,
+                        use_color,
+                        dim=True,
+                    )
+                )
+                continue
         if not artwork_finding_still_needs_action(root, finding):
             skipped.append(finding["code"])
             decisions.append(
@@ -15795,6 +15984,7 @@ def interactive_apply(
         actions: list[str] = []
         error = None
         should_apply = False
+        should_delete_art = False
         if finding["category"] == "missing_album":
             try:
                 actions = prompt_for_album_tag(
@@ -15803,7 +15993,17 @@ def interactive_apply(
                     use_color,
                     input_reader=input_reader,
                 )
-                should_apply = bool(actions)
+                skip_remaining_album_folder = (
+                    actions == [ALBUM_TAG_SKIP_REMAINING_FOLDER_ACTION]
+                )
+                if skip_remaining_album_folder:
+                    remembered_missing_album_folder_skips.add(
+                        safe_finding_path(root, finding).parent.resolve()
+                    )
+                    actions = ["unchanged:missing_album_folder_skip"]
+                    should_apply = False
+                else:
+                    should_apply = bool(actions)
                 if should_apply:
                     applied.append(finding["code"])
                 else:
